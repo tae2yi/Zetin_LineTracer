@@ -1,0 +1,11 @@
+{
+	"InstallScripts" : 
+	[
+		"/Users/ehoi/STM32CubeIDE/line_tracer/build/Debug/cmake_install.cmake",
+		"/Users/ehoi/STM32CubeIDE/line_tracer/build/Debug/cmake/stm32cubemx/cmake_install.cmake",
+		"/Users/ehoi/STM32CubeIDE/line_tracer/build/Debug/Main/cmake_install.cmake",
+		"/Users/ehoi/STM32CubeIDE/line_tracer/build/Debug/Drivers/cmake_install.cmake",
+		"/Users/ehoi/STM32CubeIDE/line_tracer/build/Debug/Drivers/BSP/cmake_install.cmake"
+	],
+	"Parallel" : false
+}

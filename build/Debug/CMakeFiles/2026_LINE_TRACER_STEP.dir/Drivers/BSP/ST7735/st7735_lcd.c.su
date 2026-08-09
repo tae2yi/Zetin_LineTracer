@@ -1,0 +1,15 @@
+/Users/ehoi/STM32CubeIDE/line_tracer/Drivers/BSP/ST7735/st7735_lcd.c:49:6:ST7735_WRAPPER_Test	48	static
+/Users/ehoi/STM32CubeIDE/line_tracer/Drivers/BSP/ST7735/st7735_lcd.c:83:6:ST7735_WRAPPER_SetBrightness	16	static
+/Users/ehoi/STM32CubeIDE/line_tracer/Drivers/BSP/ST7735/st7735_lcd.c:91:10:ST7735_WRAPPER_GetBrightness	4	static
+/Users/ehoi/STM32CubeIDE/line_tracer/Drivers/BSP/ST7735/st7735_lcd.c:98:6:ST7735_WRAPPER_SoftPWMEnable	16	static
+/Users/ehoi/STM32CubeIDE/line_tracer/Drivers/BSP/ST7735/st7735_lcd.c:147:6:ST7735_WRAPPER_Light	48	static
+/Users/ehoi/STM32CubeIDE/line_tracer/Drivers/BSP/ST7735/st7735_lcd.c:183:6:ST7735_WRAPPER_ShowChar	128	dynamic
+/Users/ehoi/STM32CubeIDE/line_tracer/Drivers/BSP/ST7735/st7735_lcd.c:274:6:ST7735_WRAPPER_ShowString	40	static
+/Users/ehoi/STM32CubeIDE/line_tracer/Drivers/BSP/ST7735/st7735_lcd.c:292:16:LCD_init	16	static
+/Users/ehoi/STM32CubeIDE/line_tracer/Drivers/BSP/ST7735/st7735_lcd.c:298:16:LCD_gettick	8	static
+/Users/ehoi/STM32CubeIDE/line_tracer/Drivers/BSP/ST7735/st7735_lcd.c:302:16:LCD_writereg	32	static
+/Users/ehoi/STM32CubeIDE/line_tracer/Drivers/BSP/ST7735/st7735_lcd.c:315:16:LCD_readreg	24	static
+/Users/ehoi/STM32CubeIDE/line_tracer/Drivers/BSP/ST7735/st7735_lcd.c:328:16:LCD_senddata	24	static
+/Users/ehoi/STM32CubeIDE/line_tracer/Drivers/BSP/ST7735/st7735_lcd.c:337:16:LCD_recvdata	24	static
+/Users/ehoi/STM32CubeIDE/line_tracer/Drivers/BSP/ST7735/st7735_lcd.c:346:6:ST7735_WRAPPER_Printf	552	static
+/Users/ehoi/STM32CubeIDE/line_tracer/Drivers/BSP/ST7735/st7735_lcd.c:360:6:ST7735_WRAPPER_Clear	24	static

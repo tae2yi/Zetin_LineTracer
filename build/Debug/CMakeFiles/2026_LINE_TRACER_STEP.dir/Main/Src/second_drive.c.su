@@ -1,0 +1,13 @@
+/Users/ehoi/STM32CubeIDE/line_tracer/Main/Src/second_drive.c:41:13:SecondDrive_StateAllowsConfiguration	16	static
+/Users/ehoi/STM32CubeIDE/line_tracer/Main/Src/second_drive.c:47:17:SecondDrive_ScaleSps	24	static
+/Users/ehoi/STM32CubeIDE/line_tracer/Main/Src/second_drive.c:58:17:SecondDrive_DistanceTolerance	24	static
+/Users/ehoi/STM32CubeIDE/line_tracer/Main/Src/second_drive.c:66:17:SecondDrive_BrakingSteps	104	static
+/Users/ehoi/STM32CubeIDE/line_tracer/Main/Src/second_drive.c:80:17:SecondDrive_TargetForSegment	16	static
+/Users/ehoi/STM32CubeIDE/line_tracer/Main/Src/second_drive.c:96:6:SecondDrivePlanner_MapIsStructurallyValid	16	static
+/Users/ehoi/STM32CubeIDE/line_tracer/Main/Src/second_drive.c:109:6:SecondDrivePlanner_Reset	56	static,ignoring_inline_asm
+/Users/ehoi/STM32CubeIDE/line_tracer/Main/Src/second_drive.c:145:6:SecondDrivePlanner_OnEvent	48	static
+/Users/ehoi/STM32CubeIDE/line_tracer/Main/Src/second_drive.c:210:10:SecondDrivePlanner_GetTargetSps	64	static
+/Users/ehoi/STM32CubeIDE/line_tracer/Main/Src/second_drive.c:273:6:SecondDrivePlanner_GetStatus	24	static,ignoring_inline_asm
+/Users/ehoi/STM32CubeIDE/line_tracer/Main/Src/second_drive.c:283:28:SecondDrive_GetConfig	4	static
+/Users/ehoi/STM32CubeIDE/line_tracer/Main/Src/second_drive.c:288:6:SecondDrive_SetStraightSps	16	static
+/Users/ehoi/STM32CubeIDE/line_tracer/Main/Src/second_drive.c:299:6:SecondDrive_SetOverallPercent	16	static

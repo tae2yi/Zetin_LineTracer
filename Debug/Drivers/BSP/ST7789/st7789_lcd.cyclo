@@ -1,0 +1,16 @@
+../Drivers/BSP/ST7789/st7789_lcd.c:41:6:ST7789_WRAPPER_Test	1
+../Drivers/BSP/ST7789/st7789_lcd.c:63:6:ST7789_WRAPPER_SetBrightness	2
+../Drivers/BSP/ST7789/st7789_lcd.c:69:10:ST7789_WRAPPER_GetBrightness	2
+../Drivers/BSP/ST7789/st7789_lcd.c:76:6:ST7789_WRAPPER_SoftPWMEnable	2
+../Drivers/BSP/ST7789/st7789_lcd.c:115:6:ST7789_WRAPPER_Light	4
+../Drivers/BSP/ST7789/st7789_lcd.c:151:6:ST7789_WRAPPER_ShowChar	20
+../Drivers/BSP/ST7789/st7789_lcd.c:237:6:ST7789_WRAPPER_ShowString	5
+../Drivers/BSP/ST7789/st7789_lcd.c:254:6:ST7789_WRAPPER_Printf	2
+../Drivers/BSP/ST7789/st7789_lcd.c:286:16:LCD_init	1
+../Drivers/BSP/ST7789/st7789_lcd.c:291:16:LCD_gettick	1
+../Drivers/BSP/ST7789/st7789_lcd.c:295:16:LCD_writereg	5
+../Drivers/BSP/ST7789/st7789_lcd.c:319:16:LCD_readreg	2
+../Drivers/BSP/ST7789/st7789_lcd.c:333:16:LCD_senddata	3
+../Drivers/BSP/ST7789/st7789_lcd.c:349:16:LCD_recvdata	3
+../Drivers/BSP/ST7789/st7789_lcd.c:365:6:ST7789_WRAPPER_Clear	1
+../Drivers/BSP/ST7789/st7789_lcd.c:372:6:LCD_Set_Color	1

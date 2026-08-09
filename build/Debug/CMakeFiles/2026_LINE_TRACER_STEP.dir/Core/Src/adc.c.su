@@ -1,0 +1,4 @@
+/Users/ehoi/STM32CubeIDE/line_tracer/Core/Src/adc.c:30:6:MX_ADC1_Init	40	static
+/Users/ehoi/STM32CubeIDE/line_tracer/Core/Src/adc.c:152:6:HAL_ADC_MspInit	264	static
+/Users/ehoi/STM32CubeIDE/line_tracer/Core/Src/adc.c:207:6:HAL_ADC_MspDeInit	16	static
+/Users/ehoi/STM32CubeIDE/line_tracer/Core/Src/adc.c:243:6:HAL_ADC_ConvCpltCallback	16	static

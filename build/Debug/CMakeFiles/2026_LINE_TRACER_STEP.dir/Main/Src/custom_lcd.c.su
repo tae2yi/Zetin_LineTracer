@@ -1,0 +1,4 @@
+/Users/ehoi/STM32CubeIDE/line_tracer/Main/Src/custom_lcd.c:13:6:Custom_LCD_Init	16	static
+/Users/ehoi/STM32CubeIDE/line_tracer/Main/Src/custom_lcd.c:22:6:Custom_LCD_Clear	8	static
+/Users/ehoi/STM32CubeIDE/line_tracer/Main/Src/custom_lcd.c:35:6:Custom_LCD_SetBrightness	16	static
+/Users/ehoi/STM32CubeIDE/line_tracer/Main/Src/custom_lcd.c:40:6:Custom_LCD_Printf	176	static

@@ -1,0 +1,7 @@
+/Users/ehoi/STM32CubeIDE/line_tracer/Main/Src/marker.c:14:16:Marker_Popcount8	24	static
+/Users/ehoi/STM32CubeIDE/line_tracer/Main/Src/marker.c:25:9:Marker_CountCenter	16	static
+/Users/ehoi/STM32CubeIDE/line_tracer/Main/Src/marker.c:30:6:MarkerDetector_Init	16	static
+/Users/ehoi/STM32CubeIDE/line_tracer/Main/Src/marker.c:38:13:MarkerDetector_Start	16	static
+/Users/ehoi/STM32CubeIDE/line_tracer/Main/Src/marker.c:52:13:MarkerDetector_Finish	24	static
+/Users/ehoi/STM32CubeIDE/line_tracer/Main/Src/marker.c:84:6:MarkerDetector_Update	40	static
+/Users/ehoi/STM32CubeIDE/line_tracer/Main/Src/marker.c:146:6:MarkerDetector_Flush	16	static

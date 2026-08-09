@@ -1,0 +1,9 @@
+/Users/ehoi/STM32CubeIDE/line_tracer/Core/Src/tim.c:35:6:MX_TIM1_Init	40	static
+/Users/ehoi/STM32CubeIDE/line_tracer/Core/Src/tim.c:77:6:MX_TIM3_Init	40	static
+/Users/ehoi/STM32CubeIDE/line_tracer/Core/Src/tim.c:121:6:MX_TIM6_Init	24	static
+/Users/ehoi/STM32CubeIDE/line_tracer/Core/Src/tim.c:154:6:MX_TIM7_Init	24	static
+/Users/ehoi/STM32CubeIDE/line_tracer/Core/Src/tim.c:187:6:MX_TIM8_Init	40	static
+/Users/ehoi/STM32CubeIDE/line_tracer/Core/Src/tim.c:229:6:MX_TIM12_Init	24	static
+/Users/ehoi/STM32CubeIDE/line_tracer/Core/Src/tim.c:262:6:HAL_TIM_Base_MspInit	40	static
+/Users/ehoi/STM32CubeIDE/line_tracer/Core/Src/tim.c:353:6:HAL_TIM_Base_MspDeInit	16	static
+/Users/ehoi/STM32CubeIDE/line_tracer/Core/Src/tim.c:440:6:HAL_TIM_PeriodElapsedCallback	16	static
