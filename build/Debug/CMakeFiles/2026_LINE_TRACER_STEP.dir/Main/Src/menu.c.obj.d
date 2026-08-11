@@ -74,12 +74,12 @@ CMakeFiles/2026_LINE_TRACER_STEP.dir/Main/Src/menu.c.obj: \
  /Applications/ArmGNUToolchain/15.2.rel1/arm-none-eabi/arm-none-eabi/include/sys/stdio.h \
  /Users/ehoi/STM32CubeIDE/line_tracer_2026/Main/./Inc/custom_lcd.h \
  /Users/ehoi/STM32CubeIDE/line_tracer_2026/Main/./Inc/drive.h \
+ /Users/ehoi/STM32CubeIDE/line_tracer_2026/Main/./Inc/track.h \
+ /Users/ehoi/STM32CubeIDE/line_tracer_2026/Main/./Inc/marker.h \
  /Users/ehoi/STM32CubeIDE/line_tracer_2026/Main/./Inc/marker.h \
  /Users/ehoi/STM32CubeIDE/line_tracer_2026/Main/./Inc/motor.h \
  /Users/ehoi/STM32CubeIDE/line_tracer_2026/Main/./Inc/second_drive.h \
  /Users/ehoi/STM32CubeIDE/line_tracer_2026/Main/./Inc/drive.h \
- /Users/ehoi/STM32CubeIDE/line_tracer_2026/Main/./Inc/track.h \
- /Users/ehoi/STM32CubeIDE/line_tracer_2026/Main/./Inc/marker.h \
  /Users/ehoi/STM32CubeIDE/line_tracer_2026/Main/./Inc/sensor.h \
  /Users/ehoi/STM32CubeIDE/line_tracer_2026/Drivers/BSP/./ST7789/st7789_lcd.h \
  /Users/ehoi/STM32CubeIDE/line_tracer_2026/Drivers/BSP/./ST7789/fonts.h \

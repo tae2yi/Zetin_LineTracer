@@ -24,6 +24,8 @@ typedef struct {
 	uint16_t max_edge7_run;
 	uint16_t max_both_overlap_run;
 	uint16_t max_wide_center_run;
+	uint8_t entry_mask;
+	uint8_t exit_mask;
 	uint16_t quiet_frames;
 	uint16_t confirm_frames;
 	uint32_t entry_frame;
@@ -40,8 +42,11 @@ typedef struct {
 	uint32_t cross_tail_source_exit_step;
 	bool pending_started_in_cross_tail;
 	uint16_t cross_tail_suppressed_count;
+	uint16_t cross_tail_affected_count;
 	uint32_t last_cross_tail_gap_steps;
+	uint32_t max_cross_tail_gap_steps;
 	uint8_t last_cross_tail_edge_union;
+	bool cross_tail_current_affected;
 } TrackCollectorRuntime_t;
 
 static TrackMarkerEvent_t events[TRACK_MAX_EVENTS];
@@ -55,6 +60,7 @@ static uint16_t cross_anchor_count;
 static uint32_t start_ignore_steps;
 static bool overflow;
 static bool cross_anchor_overflow;
+static TrackMapPairDiagnostics_t map_pair_diagnostics;
 
 static uint8_t Track_CountCenter(uint8_t mask)
 {
@@ -171,6 +177,8 @@ static bool Track_BuildCompletedEvent(TrackCollectorRuntime_t *runtime,
 	event.edge7_run = pending_event->max_edge7_run;
 	event.both_overlap_run = pending_event->max_both_overlap_run;
 	event.wide_center_run = pending_event->max_wide_center_run;
+	event.entry_mask = pending_event->entry_mask;
+	event.exit_mask = pending_event->exit_mask;
 	event.entry_frame = pending_event->entry_frame;
 	event.exit_frame = pending_event->last_active_frame;
 	event.entry_step = pending_event->entry_step;
@@ -243,6 +251,7 @@ static void Track_MergeCrossTail(TrackMarkerEvent_t *cross,
 			tail->wide_center_run);
 	if (tail->exit_frame > cross->exit_frame) {
 		cross->exit_frame = tail->exit_frame;
+		cross->exit_mask = tail->exit_mask;
 	}
 	if (tail->exit_step > cross->exit_step) {
 		cross->exit_step = tail->exit_step;
@@ -294,6 +303,7 @@ static void Track_ExpireCrossTailIfNeeded(TrackCollectorRuntime_t *runtime,
 			&& ((average_step - runtime->cross_tail_source_exit_step)
 					> TRACK_CROSS_TAIL_MAX_GAP_STEPS)) {
 		runtime->cross_tail_pending = false;
+		runtime->cross_tail_current_affected = false;
 	}
 }
 
@@ -321,20 +331,31 @@ static TrackProcessResult_t Track_CompleteCandidate(
 		runtime->last_event = merged;
 		runtime->last_cross_tail_gap_steps = gap_steps;
 		runtime->last_cross_tail_edge_union = candidate->edge_union;
+		if (gap_steps > runtime->max_cross_tail_gap_steps) {
+			runtime->max_cross_tail_gap_steps = gap_steps;
+		}
 		if (runtime->cross_tail_suppressed_count < UINT16_MAX) {
 			runtime->cross_tail_suppressed_count++;
+		}
+		if (!runtime->cross_tail_current_affected) {
+			runtime->cross_tail_current_affected = true;
+			if (runtime->cross_tail_affected_count < UINT16_MAX) {
+				runtime->cross_tail_affected_count++;
+			}
 		}
 		runtime->cooldown_until_step = candidate->exit_step
 				+ TRACK_MARK_COOLDOWN_STEPS;
 		if ((runtime->last_event.edge_union & MARKER_EDGE_MASK)
 				== MARKER_EDGE_MASK) {
 			runtime->cross_tail_pending = false;
+			runtime->cross_tail_current_affected = false;
 		}
 		runtime->pending_started_in_cross_tail = false;
 		return TRACK_PROCESS_CROSS_TAIL_MERGED;
 	}
 
 	runtime->cross_tail_pending = false;
+	runtime->cross_tail_current_affected = false;
 	runtime->last_event = *candidate;
 	runtime->pending_started_in_cross_tail = false;
 	if (store_event) {
@@ -381,6 +402,8 @@ static TrackProcessResult_t Track_ProcessInternal(
 						<= TRACK_CROSS_TAIL_MAX_GAP_STEPS);
 		Track_StartPending(runtime, frame_number, average_step);
 		runtime->pending_started_in_cross_tail = tail_start;
+		runtime->pending.entry_mask = sensor_mask;
+		runtime->pending.exit_mask = sensor_mask;
 	}
 
 	pending_event->full_union |= sensor_mask;
@@ -434,6 +457,7 @@ static TrackProcessResult_t Track_ProcessInternal(
 	}
 
 	if (active) {
+		pending_event->exit_mask = sensor_mask;
 		pending_event->last_active_frame = frame_number;
 		pending_event->last_active_step = average_step;
 		pending_event->quiet_frames = 0U;
@@ -476,6 +500,7 @@ void Track_Reset(void)
 	start_ignore_steps = 0U;
 	overflow = false;
 	cross_anchor_overflow = false;
+	memset(&map_pair_diagnostics, 0, sizeof(map_pair_diagnostics));
 	Track_ReplayReset();
 }
 
@@ -529,8 +554,12 @@ void Track_GetCollectorDiagnostics(bool replay,
 	}
 	diagnostics->cross_tail_suppressed_count =
 			runtime->cross_tail_suppressed_count;
+	diagnostics->cross_tail_affected_count =
+			runtime->cross_tail_affected_count;
 	diagnostics->last_cross_tail_gap_steps =
 			runtime->last_cross_tail_gap_steps;
+	diagnostics->max_cross_tail_gap_steps =
+			runtime->max_cross_tail_gap_steps;
 	diagnostics->last_cross_tail_edge_union =
 			runtime->last_cross_tail_edge_union;
 	diagnostics->cross_tail_pending = runtime->cross_tail_pending ? 1U : 0U;
@@ -586,6 +615,14 @@ bool Track_HasOverflow(void)
 bool Track_HasAnchorOverflow(void)
 {
 	return cross_anchor_overflow;
+}
+
+void Track_GetMapPairDiagnostics(TrackMapPairDiagnostics_t *diagnostics)
+{
+	if (diagnostics == NULL) {
+		return;
+	}
+	*diagnostics = map_pair_diagnostics;
 }
 
 static TrackSegmentType_t Track_SegmentTypeFromEvent(
@@ -689,6 +726,7 @@ void Track_FinalizeSegments(void)
 	segment_count = 0U;
 	cross_anchor_count = 0U;
 	cross_anchor_overflow = false;
+	memset(&map_pair_diagnostics, 0, sizeof(map_pair_diagnostics));
 	if (event_count == 0U) {
 		return;
 	}
@@ -713,6 +751,14 @@ void Track_FinalizeSegments(void)
 		TrackSegmentType_t type = Track_SegmentTypeFromEvent(events[index].type,
 				&turn_open, &turn_direction);
 		uint32_t distance = 0U;
+
+		if (events[index].type == MARKER_EVENT_EDGE_0
+				|| events[index].type == MARKER_EVENT_EDGE_7) {
+			map_pair_diagnostics.last_direction =
+					(events[index].type == MARKER_EVENT_EDGE_0) ? -1 : 1;
+			map_pair_diagnostics.last_direction_step =
+					events[index].center_step;
+		}
 
 		if (type == TRACK_SEGMENT_END) {
 			if (segment_count < TRACK_MAX_SEGMENTS) {
@@ -761,4 +807,7 @@ void Track_FinalizeSegments(void)
 		}
 		segment_count++;
 	}
+	map_pair_diagnostics.turn_open = turn_open ? 1U : 0U;
+	map_pair_diagnostics.turn_direction = turn_direction;
+	map_pair_diagnostics.unmatched_turn_at_end = turn_open ? 1U : 0U;
 }

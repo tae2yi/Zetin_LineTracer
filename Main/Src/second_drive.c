@@ -16,14 +16,11 @@
 #include <stddef.h>
 #include <string.h>
 
-#define SECOND_DRIVE_DEFAULT_STRAIGHT_SPS       5200U
-#define SECOND_DRIVE_DEFAULT_OVERALL_PERCENT     100U
 #define SECOND_DRIVE_TURN_REFERENCE_SPS          2200U
 #define SECOND_DRIVE_END_APPROACH_SPS            1800U
 #define SECOND_DRIVE_DECEL_SPS_PER_SECOND       10000U
 #define SECOND_DRIVE_BRAKE_MARGIN_STEPS           300U
 #define SECOND_DRIVE_ACCEL_ENABLE_MARGIN_STEPS    150U
-#define SECOND_DRIVE_POSITION_FAST_LIMIT          700
 #define SECOND_DRIVE_START_MARKER_IGNORE_STEPS    300U
 #define SECOND_DRIVE_DISTANCE_TOLERANCE_MIN        200U
 #define SECOND_DRIVE_ANCHOR_LOOKAHEAD_COUNT          3U
@@ -34,8 +31,17 @@
 
 static SecondDriveConfig_t second_drive_config = {
 	.straight_sps = SECOND_DRIVE_DEFAULT_STRAIGHT_SPS,
+	.curve_sps = SECOND_DRIVE_DEFAULT_CURVE_SPS,
 	.overall_percent = SECOND_DRIVE_DEFAULT_OVERALL_PERCENT
 };
+static volatile uint16_t second_drive_effective_straight_sps =
+		SECOND_DRIVE_DEFAULT_STRAIGHT_SPS;
+static volatile uint16_t second_drive_effective_curve_sps =
+		SECOND_DRIVE_DEFAULT_CURVE_SPS;
+static volatile uint16_t second_drive_effective_approach_sps =
+		SECOND_DRIVE_DEFAULT_CURVE_SPS + SECOND_DRIVE_APPROACH_BONUS_SPS;
+static volatile uint16_t second_drive_effective_exit_sps =
+		SECOND_DRIVE_DEFAULT_CURVE_SPS + SECOND_DRIVE_EXIT_BONUS_SPS;
 
 static volatile SecondDrivePlannerStatus_t planner_status;
 static volatile uint32_t planner_segment_start_step;
@@ -43,6 +49,22 @@ static volatile uint16_t planner_expected_event_index;
 static volatile uint32_t planner_last_anchor_map_step;
 static volatile uint32_t planner_last_anchor_run_step;
 static volatile bool planner_have_anchor;
+static volatile bool planner_replay_turn_open;
+static volatile int8_t planner_replay_turn_direction;
+static volatile uint32_t planner_replay_turn_open_step;
+static volatile int8_t planner_last_direction;
+static volatile uint32_t planner_last_direction_step;
+static volatile uint32_t planner_last_repair_step;
+static volatile int8_t planner_last_repair_direction;
+static volatile bool planner_fast_gate_ready;
+static volatile uint16_t planner_fast_stable_frames;
+static volatile uint16_t planner_final_exit_stable_frames;
+static volatile bool planner_final_exit_override;
+static volatile bool planner_cross_exit_active;
+static volatile SecondDriveRunStats_t planner_run_stats;
+static volatile bool planner_run_active;
+static volatile SecondDriveLimitReason_t planner_last_trace_reason;
+static volatile SecondDriveGeometrySource_t planner_last_trace_source;
 
 static bool SecondDrive_StateAllowsConfiguration(FirstDriveState_t state)
 {
@@ -50,15 +72,56 @@ static bool SecondDrive_StateAllowsConfiguration(FirstDriveState_t state)
 			|| (state == FIRST_DRIVE_STOPPED) || (state == FIRST_DRIVE_FAULT);
 }
 
-static uint16_t SecondDrive_ScaleSps(uint16_t value)
+static uint16_t SecondDrive_ScalePerformanceSps(uint16_t value,
+		bool *clamped)
 {
-	uint32_t scaled = ((uint32_t)value
-			* second_drive_config.overall_percent) / 100U;
+	uint32_t scaled;
 
-	if (scaled > MOTOR_DRIVE_MAX_SPS) {
-		scaled = MOTOR_DRIVE_MAX_SPS;
+	if (value == second_drive_config.straight_sps) {
+		if (clamped != NULL) {
+			*clamped = ((uint32_t)second_drive_config.straight_sps
+					* second_drive_config.overall_percent)
+					> ((uint32_t)SECOND_DRIVE_PERFORMANCE_MAX_CENTER_SPS
+							* 100U);
+		}
+		return second_drive_effective_straight_sps;
+	}
+	/* All other performance targets use their cached profile value.  Keeping
+	 * this fallback division-free is important because GetTargetSps() runs from
+	 * the 1 kHz control path. */
+	scaled = value;
+
+	if (scaled > SECOND_DRIVE_PERFORMANCE_MAX_CENTER_SPS) {
+		if (clamped != NULL) {
+			*clamped = true;
+		}
+		scaled = SECOND_DRIVE_PERFORMANCE_MAX_CENTER_SPS;
+	} else if (clamped != NULL) {
+		*clamped = false;
 	}
 	return (uint16_t)scaled;
+}
+
+static uint16_t SecondDrive_ScaleProfileValue(uint32_t nominal)
+{
+	uint32_t scaled = (nominal * second_drive_config.overall_percent) / 100U;
+
+	return (scaled > SECOND_DRIVE_PERFORMANCE_MAX_CENTER_SPS)
+			? SECOND_DRIVE_PERFORMANCE_MAX_CENTER_SPS : (uint16_t)scaled;
+}
+
+static void SecondDrive_RecomputeEffectiveProfile(void)
+{
+	second_drive_effective_straight_sps = SecondDrive_ScaleProfileValue(
+			second_drive_config.straight_sps);
+	second_drive_effective_curve_sps = SecondDrive_ScaleProfileValue(
+			second_drive_config.curve_sps);
+	second_drive_effective_approach_sps = SecondDrive_ScaleProfileValue(
+			(uint32_t)second_drive_config.curve_sps
+					+ SECOND_DRIVE_APPROACH_BONUS_SPS);
+	second_drive_effective_exit_sps = SecondDrive_ScaleProfileValue(
+			(uint32_t)second_drive_config.curve_sps
+					+ SECOND_DRIVE_EXIT_BONUS_SPS);
 }
 
 static void SecondDrive_IncrementU8(volatile uint8_t *value)
@@ -92,15 +155,16 @@ static uint32_t SecondDrive_DistanceTolerance(uint32_t recorded_distance)
 static uint32_t SecondDrive_BrakingSteps(uint16_t high_sps,
 		uint16_t low_sps)
 {
-	uint64_t numerator;
-	uint64_t denominator = 2ULL * SECOND_DRIVE_DECEL_SPS_PER_SECOND;
+	uint32_t numerator;
+	const uint32_t denominator = 2U * SECOND_DRIVE_DECEL_SPS_PER_SECOND;
 
 	if (high_sps <= low_sps) {
 		return 0U;
 	}
-	numerator = ((uint64_t)high_sps * high_sps)
-			- ((uint64_t)low_sps * low_sps);
-	return (uint32_t)((numerator + denominator - 1ULL) / denominator);
+	numerator = ((uint32_t)high_sps * high_sps)
+			- ((uint32_t)low_sps * low_sps);
+	return (numerator / denominator)
+			+ ((numerator % denominator) != 0U ? 1U : 0U);
 }
 
 static uint16_t SecondDrive_TargetForSegment(TrackSegmentType_t type)
@@ -108,14 +172,14 @@ static uint16_t SecondDrive_TargetForSegment(TrackSegmentType_t type)
 	switch (type) {
 	case TRACK_SEGMENT_LEFT:
 	case TRACK_SEGMENT_RIGHT:
-		return SecondDrive_ScaleSps(SECOND_DRIVE_TURN_REFERENCE_SPS);
+		/* This is the old safe fallback used only when geometry is uncertain. */
+		return SECOND_DRIVE_TURN_REFERENCE_SPS;
 	case TRACK_SEGMENT_END:
-		return SecondDrive_ScaleSps(SECOND_DRIVE_END_APPROACH_SPS);
+		return SECOND_DRIVE_END_APPROACH_SPS;
 	case TRACK_SEGMENT_CROSS:
 	case TRACK_SEGMENT_STRAIGHT:
 	default:
-		/* A mapped CROSS is a straight-through geometry class. */
-		return second_drive_config.straight_sps;
+		return SecondDrive_GetEffectiveStraightSps();
 	}
 }
 
@@ -123,19 +187,6 @@ static bool SecondDrive_IsFastGeometry(TrackSegmentType_t type)
 {
 	return (type == TRACK_SEGMENT_STRAIGHT)
 			|| (type == TRACK_SEGMENT_CROSS);
-}
-
-static bool SecondDrive_CourseAllowsFast(TrackSegmentType_t type,
-		FirstDriveCoursePhase_t course_phase)
-{
-	if (type == TRACK_SEGMENT_STRAIGHT) {
-		return course_phase == FIRST_DRIVE_COURSE_STRAIGHT;
-	}
-	if (type == TRACK_SEGMENT_CROSS) {
-		return (course_phase == FIRST_DRIVE_COURSE_STRAIGHT)
-				|| (course_phase == FIRST_DRIVE_COURSE_CROSS);
-	}
-	return false;
 }
 
 static void SecondDrive_LoadSegmentStatus(uint16_t segment_index)
@@ -162,6 +213,7 @@ static void SecondDrive_LoadSegmentStatus(uint16_t segment_index)
 	planner_status.segment_distance_steps = segment->distance_steps;
 	planner_status.segment_travelled_steps = 0U;
 	planner_status.segment_remaining_steps = segment->distance_steps;
+	planner_status.segment_start_step = planner_segment_start_step;
 	planner_status.next_segment_type = (next_segment != NULL)
 			? next_segment->type : TRACK_SEGMENT_END;
 	planner_status.next_restriction_distance_steps = 0U;
@@ -218,9 +270,174 @@ static void SecondDrive_EnterSeekCross(SecondDriveMismatchReason_t reason)
 	}
 	if (planner_status.sync_state == SECOND_DRIVE_SYNC_MAP) {
 		SecondDrive_IncrementU8(&planner_status.mismatch_count);
+		if (planner_run_active) {
+			SecondDrive_IncrementU16(&planner_run_stats.mismatch_count);
+		}
 		planner_status.sync_state = SECOND_DRIVE_SYNC_SEEK_CROSS;
 	}
 	planner_status.last_mismatch_reason = reason;
+}
+
+static bool SecondDrive_EventDirection(const TrackMarkerEvent_t *event,
+		int8_t *direction)
+{
+	if ((event == NULL) || (direction == NULL)) {
+		return false;
+	}
+	if (event->type == MARKER_EVENT_EDGE_0) {
+		*direction = -1;
+		return true;
+	}
+	if (event->type == MARKER_EVENT_EDGE_7) {
+		*direction = 1;
+		return true;
+	}
+	return false;
+}
+
+static void SecondDrive_PublishPairState(void)
+{
+	planner_status.replay_turn_open = planner_replay_turn_open ? 1U : 0U;
+	planner_status.replay_turn_direction = planner_replay_turn_direction;
+	planner_status.replay_turn_open_step = planner_replay_turn_open_step;
+}
+
+static void SecondDrive_ResetReplayPair(
+		SecondDriveGeometrySource_t source)
+{
+	planner_replay_turn_open = false;
+	planner_replay_turn_direction = 0;
+	planner_replay_turn_open_step = 0U;
+	planner_cross_exit_active = true;
+	planner_status.local_close_repair_active = 0U;
+	planner_status.geometry_source = source;
+	SecondDrive_PublishPairState();
+}
+
+static void SecondDrive_ApplyReplayPairEvent(const TrackMarkerEvent_t *event)
+{
+	int8_t direction;
+
+	if (event == NULL) {
+		return;
+	}
+	planner_status.local_close_repair_active = 0U;
+	if (event->type == MARKER_EVENT_CROSS) {
+		SecondDrive_ResetReplayPair(SECOND_DRIVE_GEOMETRY_CROSS_RESET);
+		planner_last_direction = 0;
+		planner_last_direction_step = event->center_step;
+		return;
+	}
+	if (event->type == MARKER_EVENT_BOTH) {
+		/* END is a diagnostic boundary.  Never infer a close from centring or
+		 * from the bilateral END marker itself. */
+		planner_cross_exit_active = false;
+		SecondDrive_PublishPairState();
+		return;
+	}
+	if (!SecondDrive_EventDirection(event, &direction)) {
+		return;
+	}
+	planner_last_direction = direction;
+	planner_last_direction_step = event->center_step;
+	planner_cross_exit_active = false;
+	if (!planner_replay_turn_open) {
+		planner_replay_turn_open = true;
+		planner_replay_turn_direction = direction;
+		planner_replay_turn_open_step = event->center_step;
+		planner_status.geometry_source = SECOND_DRIVE_GEOMETRY_PAIR_OPEN;
+	} else if (planner_replay_turn_direction == direction) {
+		planner_replay_turn_open = false;
+		planner_replay_turn_direction = 0;
+		planner_replay_turn_open_step = 0U;
+		planner_status.geometry_source = SECOND_DRIVE_GEOMETRY_PAIR_CLOSE;
+	} else {
+		planner_replay_turn_open = true;
+		planner_replay_turn_direction = direction;
+		planner_replay_turn_open_step = event->center_step;
+		planner_status.geometry_source = SECOND_DRIVE_GEOMETRY_PAIR_OPEN;
+	}
+	SecondDrive_PublishPairState();
+}
+
+static bool SecondDrive_IsFinalEndExpected(void)
+{
+	const TrackMarkerEvent_t *expected_event =
+			Track_GetEvent(planner_expected_event_index);
+	const TrackSegment_t *last_segment;
+
+	if ((expected_event == NULL)
+			|| (expected_event->type != MARKER_EVENT_BOTH)
+			|| (planner_expected_event_index + 1U != Track_GetEventCount())) {
+		return false;
+	}
+	last_segment = Track_GetSegment(Track_GetSegmentCount() - 1U);
+	return (last_segment != NULL)
+			&& (last_segment->type == TRACK_SEGMENT_END);
+}
+
+static bool SecondDrive_GeometryEvidenceAllowsFast(void)
+{
+	return (planner_status.geometry_source
+			== SECOND_DRIVE_GEOMETRY_MAP_SEGMENT)
+			|| (planner_status.geometry_source
+					== SECOND_DRIVE_GEOMETRY_PAIR_CLOSE)
+			|| (planner_status.geometry_source
+					== SECOND_DRIVE_GEOMETRY_CROSS_RESET)
+			|| (planner_status.geometry_source
+					== SECOND_DRIVE_GEOMETRY_LOCAL_CLOSE_REPAIR);
+}
+
+static void SecondDrive_UpdateFastGate(bool line_valid,
+		int32_t line_position, FirstDriveCoursePhase_t course_phase)
+{
+	uint32_t absolute_position = (line_position < 0)
+			? (uint32_t)(-line_position) : (uint32_t)line_position;
+	bool phase_allowed = (course_phase == FIRST_DRIVE_COURSE_STRAIGHT)
+			|| (course_phase == FIRST_DRIVE_COURSE_CROSS);
+
+	if (!line_valid || !phase_allowed) {
+		if (planner_fast_gate_ready && planner_run_active
+				&& (planner_run_stats.fast_exit_count < UINT16_MAX)) {
+			planner_run_stats.fast_exit_count++;
+		}
+		if (planner_fast_gate_ready) {
+			planner_status.fast_gate_ready = 0U;
+		}
+		planner_fast_gate_ready = false;
+		planner_fast_stable_frames = 0U;
+		planner_status.centered_stable_frames = 0U;
+		return;
+	}
+	if (absolute_position <= SECOND_DRIVE_FAST_ENTER_POSITION) {
+		if (planner_fast_stable_frames < UINT16_MAX) {
+			planner_fast_stable_frames++;
+		}
+		planner_status.centered_stable_frames = planner_fast_stable_frames;
+	} else if (absolute_position >= SECOND_DRIVE_FAST_EXIT_POSITION) {
+		planner_fast_stable_frames = 0U;
+		planner_status.centered_stable_frames = 0U;
+		if (planner_fast_gate_ready && planner_run_active
+				&& (planner_run_stats.fast_exit_count < UINT16_MAX)) {
+			planner_run_stats.fast_exit_count++;
+		}
+		planner_fast_gate_ready = false;
+	} else if (!planner_fast_gate_ready) {
+		/* Hysteresis band: a not-yet-entered gate still needs a centered run. */
+		planner_fast_stable_frames = 0U;
+		planner_status.centered_stable_frames = 0U;
+	}
+	if (!planner_fast_gate_ready
+			&& (planner_fast_stable_frames
+					>= SECOND_DRIVE_FAST_STABLE_FRAMES)) {
+		planner_fast_gate_ready = true;
+		planner_status.fast_gate_ready = 1U;
+		if (planner_run_active
+				&& (planner_run_stats.fast_entry_count < UINT16_MAX)) {
+			planner_run_stats.fast_entry_count++;
+		}
+	}
+	planner_status.fast_gate_ready = planner_fast_gate_ready ? 1U : 0U;
 }
 
 void SecondDrivePlanner_Reset(void)
@@ -237,11 +454,14 @@ void SecondDrivePlanner_Reset(void)
 	reset_status.sync_state = map_valid ? SECOND_DRIVE_SYNC_MAP
 			: SECOND_DRIVE_SYNC_INVALID;
 	reset_status.last_mismatch_reason = SECOND_DRIVE_MISMATCH_NONE;
+	reset_status.limit_reason = SECOND_DRIVE_LIMIT_NONE;
+	reset_status.geometry_source = SECOND_DRIVE_GEOMETRY_UNCERTAIN;
 	reset_status.segment_count = Track_GetSegmentCount();
 	reset_status.anchor_count = Track_GetCrossAnchorCount();
 	reset_status.current_anchor_order = UINT16_MAX;
 	segment = Track_GetSegment(0U);
 	if (segment != NULL) {
+		reset_status.geometry_source = SECOND_DRIVE_GEOMETRY_MAP_SEGMENT;
 		reset_status.segment_type = segment->type;
 		reset_status.curve_units = segment->curve_units;
 		reset_status.segment_distance_steps = segment->distance_steps;
@@ -267,6 +487,21 @@ void SecondDrivePlanner_Reset(void)
 	planner_last_anchor_map_step = 0U;
 	planner_last_anchor_run_step = 0U;
 	planner_have_anchor = false;
+	planner_replay_turn_open = false;
+	planner_replay_turn_direction = 0;
+	planner_replay_turn_open_step = 0U;
+	planner_last_direction = 0;
+	planner_last_direction_step = 0U;
+	planner_last_repair_step = 0U;
+	planner_last_repair_direction = 0;
+	planner_fast_gate_ready = false;
+	planner_fast_stable_frames = 0U;
+	planner_final_exit_stable_frames = 0U;
+	planner_final_exit_override = false;
+	planner_cross_exit_active = false;
+	planner_last_trace_reason = SECOND_DRIVE_LIMIT_NONE;
+	planner_last_trace_source = reset_status.geometry_source;
+	planner_run_active = false;
 	__enable_irq();
 }
 
@@ -343,7 +578,99 @@ static bool SecondDrive_AdvanceAfterEvent(const TrackMarkerEvent_t *event)
 			(uint16_t)(planner_expected_event_index + 1U));
 	}
 	planner_segment_start_step = event->center_step;
+	planner_status.segment_start_step = planner_segment_start_step;
 	SecondDrive_LoadSegmentStatus(next_segment_index);
+	return true;
+}
+
+static bool SecondDrive_TryLocalCloseRepair(
+		const TrackMarkerEvent_t *event)
+{
+	const TrackMarkerEvent_t *expected_event;
+	const TrackSegment_t *current_segment;
+	int8_t direction;
+	uint32_t gap_steps;
+
+	if (!SecondDrive_EventDirection(event, &direction)) {
+		return false;
+	}
+	if ((planner_status.map_valid == 0U)
+			|| (planner_status.sync_state != SECOND_DRIVE_SYNC_MAP)) {
+		planner_status.local_repair_reject_reason =
+				SECOND_DRIVE_LOCAL_REPAIR_MAP_NOT_SYNC;
+		return false;
+	}
+	if (event->confidence < 20U) {
+		planner_status.local_repair_reject_reason =
+				SECOND_DRIVE_LOCAL_REPAIR_LOW_CONFIDENCE;
+		return false;
+	}
+	if (!planner_replay_turn_open) {
+		planner_status.local_repair_reject_reason =
+				SECOND_DRIVE_LOCAL_REPAIR_NO_OPEN;
+		return false;
+	}
+	if (planner_replay_turn_direction != direction) {
+		planner_status.local_repair_reject_reason =
+				SECOND_DRIVE_LOCAL_REPAIR_WRONG_SIDE;
+		return false;
+	}
+	expected_event = Track_GetEvent(planner_expected_event_index);
+	if ((expected_event == NULL)
+			|| ((expected_event->type != MARKER_EVENT_CROSS)
+					&& !SecondDrive_IsFinalEndExpected())) {
+		planner_status.local_repair_reject_reason =
+				SECOND_DRIVE_LOCAL_REPAIR_EXPECTED_NOT_BOUNDARY;
+		return false;
+	}
+	current_segment = Track_GetSegment(planner_status.segment_index);
+	if ((current_segment == NULL)
+			|| (((direction < 0) ? TRACK_SEGMENT_LEFT : TRACK_SEGMENT_RIGHT)
+					!= current_segment->type)) {
+		planner_status.local_repair_reject_reason =
+				SECOND_DRIVE_LOCAL_REPAIR_SEGMENT_MISMATCH;
+		return false;
+	}
+	if (event->center_step < planner_replay_turn_open_step) {
+		planner_status.local_repair_reject_reason =
+				SECOND_DRIVE_LOCAL_REPAIR_DUPLICATE;
+		return false;
+	}
+	gap_steps = event->center_step - planner_replay_turn_open_step;
+	if ((gap_steps <= TRACK_MARK_COOLDOWN_STEPS)
+			|| ((planner_last_repair_step == event->center_step)
+					&& (planner_last_repair_direction == direction))) {
+		planner_status.local_repair_reject_reason =
+				SECOND_DRIVE_LOCAL_REPAIR_DUPLICATE;
+		return false;
+	}
+
+	/* This is supplemental replay geometry only.  Keep the map event index,
+	 * segment start and every finalized First Drive array untouched. */
+	planner_replay_turn_open = false;
+	planner_replay_turn_direction = 0;
+	planner_replay_turn_open_step = 0U;
+	planner_cross_exit_active = false;
+	planner_last_direction = direction;
+	planner_last_direction_step = event->center_step;
+	planner_last_repair_step = event->center_step;
+	planner_last_repair_direction = direction;
+	planner_status.local_close_repair_active = 1U;
+	planner_status.local_close_repair_direction = direction;
+	planner_status.local_close_repair_step = event->center_step;
+	planner_status.local_repair_reject_reason = SECOND_DRIVE_LOCAL_REPAIR_NONE;
+	planner_status.geometry_source =
+			SECOND_DRIVE_GEOMETRY_LOCAL_CLOSE_REPAIR;
+	planner_status.last_mismatch_reason = SECOND_DRIVE_MISMATCH_NONE;
+	if (planner_status.local_close_repair_count < UINT16_MAX) {
+		planner_status.local_close_repair_count++;
+	}
+	if (planner_run_active) {
+		if (planner_run_stats.local_close_repair_count < UINT16_MAX) {
+			planner_run_stats.local_close_repair_count++;
+		}
+	}
+	SecondDrive_PublishPairState();
 	return true;
 }
 
@@ -474,6 +801,7 @@ static bool SecondDrive_TryResyncAtCross(const TrackMarkerEvent_t *event,
 	}
 	SecondDrive_SetExpectedEventIndex(next_event_index);
 	planner_segment_start_step = event->center_step;
+	planner_status.segment_start_step = planner_segment_start_step;
 	planner_status.current_anchor_order = anchor->order;
 	planner_last_anchor_map_step = anchor->center_step;
 	planner_last_anchor_run_step = event->center_step;
@@ -481,6 +809,10 @@ static bool SecondDrive_TryResyncAtCross(const TrackMarkerEvent_t *event,
 	planner_status.sync_state = SECOND_DRIVE_SYNC_MAP;
 	planner_status.last_mismatch_reason = SECOND_DRIVE_MISMATCH_NONE;
 	SecondDrive_IncrementU8(&planner_status.resync_count);
+	if (planner_run_active && (planner_run_stats.resync_count < UINT16_MAX)) {
+		planner_run_stats.resync_count++;
+	}
+	SecondDrive_ResetReplayPair(SECOND_DRIVE_GEOMETRY_CROSS_RESET);
 	SecondDrive_LoadSegmentStatus(anchor->segment_index_after_cross);
 	return true;
 }
@@ -490,13 +822,19 @@ void SecondDrivePlanner_OnEvent(const TrackMarkerEvent_t *event)
 	SecondDriveMismatchReason_t reason;
 	SecondDriveMismatchReason_t anchor_reason;
 	SecondDriveAnchorMatchResult_t anchor_result;
+	int8_t event_direction;
 
-	if ((event == NULL) || (event->confidence < 20U)
-			|| (planner_status.map_valid == 0U)) {
+	if (event == NULL || (planner_status.map_valid == 0U)) {
 		return;
 	}
 	if ((event->type == MARKER_EVENT_BOTH)
 			&& (event->center_step < SECOND_DRIVE_START_MARKER_IGNORE_STEPS)) {
+		return;
+	}
+	if (event->confidence < 20U) {
+		planner_status.local_repair_reject_reason =
+				SECOND_DRIVE_LOCAL_REPAIR_LOW_CONFIDENCE;
+		SecondDrive_IncrementU16(&planner_status.ignored_event_count);
 		return;
 	}
 	SecondDrive_IncrementU16(&planner_status.replay_event_count);
@@ -526,7 +864,16 @@ void SecondDrivePlanner_OnEvent(const TrackMarkerEvent_t *event)
 			return;
 		}
 		planner_status.last_mismatch_reason = SECOND_DRIVE_MISMATCH_NONE;
+		SecondDrive_ApplyReplayPairEvent(event);
 		return;
+	}
+	if (SecondDrive_EventDirection(event, &event_direction)) {
+		/* Directional mismatch is tracked separately from anchor resync. */
+		(void)event_direction;
+		SecondDrive_IncrementU16(&planner_status.marker_pair_mismatch_count);
+		if (SecondDrive_TryLocalCloseRepair(event)) {
+			return;
+		}
 	}
 
 	if (event->type == MARKER_EVENT_CROSS) {
@@ -537,6 +884,9 @@ void SecondDrivePlanner_OnEvent(const TrackMarkerEvent_t *event)
 			/* The event was unexpected for the current map position, but the
 			 * physical CROSS is a strong enough absolute anchor to recover now. */
 			SecondDrive_IncrementU8(&planner_status.mismatch_count);
+			if (planner_run_active) {
+				SecondDrive_IncrementU16(&planner_run_stats.mismatch_count);
+			}
 			if (SecondDrive_TryResyncAtCross(event, &anchor_reason)) {
 				return;
 			}
@@ -549,7 +899,8 @@ void SecondDrivePlanner_OnEvent(const TrackMarkerEvent_t *event)
 }
 
 static uint32_t SecondDrive_DistanceToNextRestriction(uint32_t current_remaining,
-		uint16_t current_segment_index, TrackSegmentType_t *restriction_type)
+		uint16_t current_segment_index, bool override_current_geometry,
+		TrackSegmentType_t *restriction_type)
 {
 	const TrackSegment_t *current_segment =
 			Track_GetSegment(current_segment_index);
@@ -565,7 +916,8 @@ static uint32_t SecondDrive_DistanceToNextRestriction(uint32_t current_remaining
 		}
 		return 0U;
 	}
-	if (!SecondDrive_IsFastGeometry(current_segment->type)) {
+	if (!override_current_geometry
+			&& !SecondDrive_IsFastGeometry(current_segment->type)) {
 		if (restriction_type != NULL) {
 			*restriction_type = current_segment->type;
 		}
@@ -603,34 +955,156 @@ static uint32_t SecondDrive_DistanceToNextRestriction(uint32_t current_remaining
 	return UINT32_MAX;
 }
 
+static uint16_t SecondDrive_SetPlannerTarget(uint16_t target,
+		SecondDriveLimitReason_t reason)
+{
+	planner_status.planner_target_sps = target;
+	planner_status.limit_reason = reason;
+	return target;
+}
+
+static bool SecondDrive_IsCurvePhase(FirstDriveCoursePhase_t phase)
+{
+	return (phase == FIRST_DRIVE_COURSE_APPROACH_LEFT)
+			|| (phase == FIRST_DRIVE_COURSE_APPROACH_RIGHT)
+			|| (phase == FIRST_DRIVE_COURSE_TURN_LEFT)
+			|| (phase == FIRST_DRIVE_COURSE_TURN_RIGHT)
+			|| (phase == FIRST_DRIVE_COURSE_EXIT_LEFT)
+			|| (phase == FIRST_DRIVE_COURSE_EXIT_RIGHT);
+}
+
+static uint16_t SecondDrive_GetPhaseTarget(
+		FirstDriveCoursePhase_t course_phase,
+		SecondDriveLimitReason_t *reason)
+{
+	if (reason == NULL) {
+		return SecondDrive_GetEffectiveCurveSps();
+	}
+	switch (course_phase) {
+	case FIRST_DRIVE_COURSE_APPROACH_LEFT:
+	case FIRST_DRIVE_COURSE_APPROACH_RIGHT:
+		*reason = SECOND_DRIVE_LIMIT_CURVE_APPROACH;
+		return SecondDrive_GetEffectiveApproachSps();
+	case FIRST_DRIVE_COURSE_EXIT_LEFT:
+	case FIRST_DRIVE_COURSE_EXIT_RIGHT:
+		*reason = SECOND_DRIVE_LIMIT_CURVE_EXIT;
+		return SecondDrive_GetEffectiveExitSps();
+	case FIRST_DRIVE_COURSE_TURN_LEFT:
+	case FIRST_DRIVE_COURSE_TURN_RIGHT:
+		*reason = SECOND_DRIVE_LIMIT_CURVE_CRUISE;
+		return SecondDrive_GetEffectiveCurveSps();
+	default:
+		*reason = SECOND_DRIVE_LIMIT_CURVE_CRUISE;
+		return SecondDrive_GetEffectiveCurveSps();
+	}
+}
+
+static void SecondDrive_UpdateFinalExitOverride(bool final_end_expected,
+		bool line_valid, bool recovering, bool provisional_marker,
+		int32_t line_position, FirstDriveCoursePhase_t course_phase)
+{
+	uint32_t absolute_position = (line_position < 0)
+			? (uint32_t)(-line_position) : (uint32_t)line_position;
+	bool exit_phase = (course_phase == FIRST_DRIVE_COURSE_EXIT_LEFT)
+			|| (course_phase == FIRST_DRIVE_COURSE_EXIT_RIGHT);
+
+	if (!final_end_expected || !exit_phase || !line_valid || recovering
+			|| provisional_marker || planner_replay_turn_open
+			|| ((planner_status.geometry_source
+					!= SECOND_DRIVE_GEOMETRY_PAIR_CLOSE)
+				&& (planner_status.geometry_source
+						!= SECOND_DRIVE_GEOMETRY_LOCAL_CLOSE_REPAIR))) {
+		planner_final_exit_stable_frames = 0U;
+		planner_final_exit_override = false;
+		return;
+	}
+	if (absolute_position <= SECOND_DRIVE_FAST_ENTER_POSITION) {
+		if (planner_final_exit_stable_frames < UINT16_MAX) {
+			planner_final_exit_stable_frames++;
+		}
+	} else {
+		planner_final_exit_stable_frames = 0U;
+		planner_final_exit_override = false;
+	}
+	planner_status.centered_stable_frames = planner_final_exit_stable_frames;
+	if (planner_final_exit_stable_frames
+			>= SECOND_DRIVE_FINAL_EXIT_STABLE_FRAMES) {
+		planner_final_exit_override = true;
+	}
+}
+
+static SecondDriveLimitReason_t SecondDrive_GetFastLimitReason(
+		bool performance_clamped, bool cross_corridor)
+{
+	if (performance_clamped) {
+		return SECOND_DRIVE_LIMIT_MAX_CLAMP;
+	}
+	if (planner_cross_exit_active) {
+		return SECOND_DRIVE_LIMIT_FAST_CROSS_EXIT;
+	}
+	if (cross_corridor) {
+		return (planner_status.geometry_source
+				== SECOND_DRIVE_GEOMETRY_LOCAL_CLOSE_REPAIR)
+				? SECOND_DRIVE_LIMIT_FAST_LOCAL_CLOSE_REPAIR
+				: SECOND_DRIVE_LIMIT_FAST_CROSS_APPROACH;
+	}
+	return SECOND_DRIVE_LIMIT_FAST_STRAIGHT;
+}
+
 uint16_t SecondDrivePlanner_GetTargetSps(uint16_t first_drive_target_sps,
 		int32_t line_position, FirstDriveCoursePhase_t course_phase,
-		uint32_t average_step, uint16_t current_sps)
+		uint32_t average_step, uint16_t current_sps, bool line_valid,
+		bool recovering, bool provisional_marker)
 {
 	const TrackSegment_t *segment;
+	const TrackMarkerEvent_t *expected_event;
 	TrackSegmentType_t restriction_type;
+	SecondDriveLimitReason_t phase_reason;
 	uint32_t travelled;
 	uint32_t remaining;
 	uint32_t distance_to_restriction;
 	uint32_t braking_steps;
-	uint16_t scaled_target;
+	uint16_t nominal_target;
+	uint16_t planner_target;
 	uint16_t restriction_target;
 	uint64_t braking_limit;
 	uint32_t absolute_position = (line_position < 0)
 			? (uint32_t)(-line_position) : (uint32_t)line_position;
+	bool cross_corridor = false;
+	bool final_corridor = false;
+	bool override_current_geometry = false;
+	bool performance_clamped = false;
+	bool fast_eligible = false;
+
+	planner_status.cross_approach_corridor = 0U;
+	planner_status.final_end_corridor = 0U;
+	planner_status.expected_marker_distance_steps = 0U;
+	SecondDrive_UpdateFastGate(line_valid, line_position, course_phase);
 
 	if ((planner_status.map_valid == 0U)
 			|| (planner_status.sync_state != SECOND_DRIVE_SYNC_MAP)) {
+		planner_status.geometry_source = SECOND_DRIVE_GEOMETRY_UNCERTAIN;
+		planner_status.nominal_target_sps = first_drive_target_sps;
+		planner_status.planner_target_sps = first_drive_target_sps;
+		planner_status.limit_reason = (planner_status.map_valid == 0U)
+				? SECOND_DRIVE_LIMIT_MAP_INVALID
+				: SECOND_DRIVE_LIMIT_SEEK_CROSS;
 		return first_drive_target_sps;
 	}
 
 	segment = Track_GetSegment(planner_status.segment_index);
 	if (segment == NULL) {
 		SecondDrive_EnterSeekCross(SECOND_DRIVE_MISMATCH_MAP_BOUNDS);
+		planner_status.nominal_target_sps = first_drive_target_sps;
+		planner_status.planner_target_sps = first_drive_target_sps;
+		planner_status.limit_reason = SECOND_DRIVE_LIMIT_SEGMENT_UNCERTAIN;
 		return first_drive_target_sps;
 	}
 	if (average_step < planner_segment_start_step) {
 		SecondDrive_EnterSeekCross(SECOND_DRIVE_MISMATCH_MAP_BOUNDS);
+		planner_status.nominal_target_sps = first_drive_target_sps;
+		planner_status.planner_target_sps = first_drive_target_sps;
+		planner_status.limit_reason = SECOND_DRIVE_LIMIT_SEGMENT_UNCERTAIN;
 		return first_drive_target_sps;
 	}
 	travelled = average_step - planner_segment_start_step;
@@ -642,34 +1116,332 @@ uint16_t SecondDrivePlanner_GetTargetSps(uint16_t first_drive_target_sps,
 			&& ((travelled - segment->distance_steps)
 					> SecondDrive_DistanceTolerance(segment->distance_steps))) {
 		SecondDrive_EnterSeekCross(SECOND_DRIVE_MISMATCH_SEGMENT_OVERDUE);
+		planner_status.nominal_target_sps = first_drive_target_sps;
+		planner_status.planner_target_sps = first_drive_target_sps;
+		planner_status.limit_reason = SECOND_DRIVE_LIMIT_SEGMENT_UNCERTAIN;
 		return first_drive_target_sps;
+	}
+	expected_event = Track_GetEvent(planner_expected_event_index);
+	if ((expected_event != NULL)
+			&& (expected_event->center_step >= planner_segment_start_step)) {
+		planner_status.expected_marker_distance_steps =
+				expected_event->center_step - planner_segment_start_step;
+	}
+	SecondDrive_UpdateFinalExitOverride(
+			SecondDrive_IsFinalEndExpected(), line_valid, recovering,
+			provisional_marker, line_position, course_phase);
+
+	final_corridor = SecondDrive_IsFinalEndExpected()
+			&& !planner_replay_turn_open
+			&& SecondDrive_GeometryEvidenceAllowsFast()
+			&& line_valid && !recovering && !provisional_marker
+			&& ((course_phase == FIRST_DRIVE_COURSE_STRAIGHT
+					&& planner_fast_gate_ready)
+				|| planner_final_exit_override);
+	if (final_corridor
+			&& !SecondDrive_IsFastGeometry(segment->type)
+			&& (planner_status.geometry_source
+					!= SECOND_DRIVE_GEOMETRY_PAIR_CLOSE)
+			&& (planner_status.geometry_source
+					!= SECOND_DRIVE_GEOMETRY_LOCAL_CLOSE_REPAIR)) {
+		final_corridor = false;
+	}
+	planner_status.final_end_corridor = final_corridor ? 1U : 0U;
+
+	cross_corridor = (expected_event != NULL)
+			&& (expected_event->type == MARKER_EVENT_CROSS)
+			&& !planner_replay_turn_open
+			&& SecondDrive_GeometryEvidenceAllowsFast()
+			&& line_valid && !recovering && !provisional_marker
+			&& (course_phase == FIRST_DRIVE_COURSE_STRAIGHT)
+			&& planner_fast_gate_ready;
+	if (cross_corridor
+			&& !SecondDrive_IsFastGeometry(segment->type)
+			&& (planner_status.geometry_source
+					!= SECOND_DRIVE_GEOMETRY_PAIR_CLOSE)
+			&& (planner_status.geometry_source
+					!= SECOND_DRIVE_GEOMETRY_LOCAL_CLOSE_REPAIR)) {
+		cross_corridor = false;
+	}
+	planner_status.cross_approach_corridor = cross_corridor ? 1U : 0U;
+	override_current_geometry = cross_corridor
+			&& !SecondDrive_IsFastGeometry(segment->type);
+
+	if (final_corridor) {
+		nominal_target = SecondDrive_ScalePerformanceSps(
+				second_drive_config.straight_sps, &performance_clamped);
+		planner_status.nominal_target_sps = nominal_target;
+		return SecondDrive_SetPlannerTarget(nominal_target,
+				performance_clamped ? SECOND_DRIVE_LIMIT_MAX_CLAMP
+						: ((planner_status.geometry_source
+								== SECOND_DRIVE_GEOMETRY_LOCAL_CLOSE_REPAIR)
+								? SECOND_DRIVE_LIMIT_FAST_LOCAL_CLOSE_REPAIR
+								: SECOND_DRIVE_LIMIT_FAST_END_CORRIDOR));
+	}
+
+	if (SecondDrive_IsCurvePhase(course_phase)
+			&& (!SecondDrive_IsFastGeometry(segment->type)
+					|| !planner_fast_gate_ready || planner_replay_turn_open)) {
+		nominal_target = SecondDrive_GetPhaseTarget(course_phase, &phase_reason);
+		planner_status.nominal_target_sps = nominal_target;
+		return SecondDrive_SetPlannerTarget(nominal_target, phase_reason);
+	}
+
+	fast_eligible = (SecondDrive_IsFastGeometry(segment->type)
+			|| cross_corridor)
+			&& line_valid && !recovering && !provisional_marker
+			&& !planner_replay_turn_open
+			&& planner_fast_gate_ready
+			&& ((course_phase == FIRST_DRIVE_COURSE_STRAIGHT)
+					|| (course_phase == FIRST_DRIVE_COURSE_CROSS));
+	if (!fast_eligible) {
+		if (planner_replay_turn_open) {
+			planner_target = SecondDrive_GetPhaseTarget(course_phase,
+					&phase_reason);
+			planner_status.nominal_target_sps = planner_target;
+			return SecondDrive_SetPlannerTarget(planner_target,
+					SECOND_DRIVE_LIMIT_MARKER_PAIR_UNCLOSED);
+		}
+		if (!line_valid || (absolute_position > SECOND_DRIVE_FAST_ENTER_POSITION)) {
+			planner_status.nominal_target_sps = first_drive_target_sps;
+			return SecondDrive_SetPlannerTarget(first_drive_target_sps,
+					SECOND_DRIVE_LIMIT_POSITION);
+		}
+		if (course_phase != FIRST_DRIVE_COURSE_STRAIGHT) {
+			planner_status.nominal_target_sps = first_drive_target_sps;
+			return SecondDrive_SetPlannerTarget(first_drive_target_sps,
+					SECOND_DRIVE_LIMIT_PHASE_NOT_STRAIGHT);
+		}
+		if (segment->type == TRACK_SEGMENT_END) {
+			planner_status.nominal_target_sps =
+					SECOND_DRIVE_END_APPROACH_SPS;
+			return SecondDrive_SetPlannerTarget(
+					SECOND_DRIVE_END_APPROACH_SPS,
+					SECOND_DRIVE_LIMIT_END_BRAKE);
+		}
+		planner_status.nominal_target_sps = first_drive_target_sps;
+		return SecondDrive_SetPlannerTarget(first_drive_target_sps,
+				SECOND_DRIVE_LIMIT_SEGMENT_UNCERTAIN);
 	}
 
 	distance_to_restriction = SecondDrive_DistanceToNextRestriction(remaining,
-			planner_status.segment_index, &restriction_type);
+				planner_status.segment_index, override_current_geometry,
+				&restriction_type);
 	planner_status.next_restriction_distance_steps = distance_to_restriction;
-	scaled_target = SecondDrive_ScaleSps(first_drive_target_sps);
-	if (!SecondDrive_IsFastGeometry(segment->type)
-			|| !SecondDrive_CourseAllowsFast(segment->type, course_phase)
-			|| (absolute_position > SECOND_DRIVE_POSITION_FAST_LIMIT)) {
-		return scaled_target;
-	}
+	nominal_target = SecondDrive_ScalePerformanceSps(
+				second_drive_config.straight_sps, &performance_clamped);
+	planner_status.nominal_target_sps = nominal_target;
 	if (distance_to_restriction == UINT32_MAX) {
-		return second_drive_config.straight_sps;
+		return SecondDrive_SetPlannerTarget(nominal_target,
+				SecondDrive_GetFastLimitReason(performance_clamped,
+						cross_corridor));
 	}
 
-	restriction_target = SecondDrive_TargetForSegment(restriction_type);
-	braking_steps = SecondDrive_BrakingSteps(
-			(second_drive_config.straight_sps > current_sps)
-					? second_drive_config.straight_sps : current_sps,
-			restriction_target);
-	braking_limit = (uint64_t)braking_steps
-			+ SECOND_DRIVE_BRAKE_MARGIN_STEPS
-			+ SECOND_DRIVE_ACCEL_ENABLE_MARGIN_STEPS;
-	if ((uint64_t)distance_to_restriction > braking_limit) {
-		return second_drive_config.straight_sps;
+	if (final_corridor) {
+		return SecondDrive_SetPlannerTarget(nominal_target,
+				SECOND_DRIVE_LIMIT_FAST_END_CORRIDOR);
 	}
-	return restriction_target;
+	restriction_target = (restriction_type == TRACK_SEGMENT_LEFT
+				|| restriction_type == TRACK_SEGMENT_RIGHT)
+				? SecondDrive_GetEffectiveApproachSps()
+				: SecondDrive_TargetForSegment(restriction_type);
+	braking_steps = SecondDrive_BrakingSteps(
+				(nominal_target > current_sps) ? nominal_target : current_sps,
+				restriction_target);
+	braking_limit = (uint64_t)braking_steps
+				+ SECOND_DRIVE_BRAKE_MARGIN_STEPS
+				+ SECOND_DRIVE_ACCEL_ENABLE_MARGIN_STEPS;
+	if ((uint64_t)distance_to_restriction <= braking_limit) {
+		return SecondDrive_SetPlannerTarget(restriction_target,
+				SECOND_DRIVE_LIMIT_TURN_BRAKE);
+	}
+	return SecondDrive_SetPlannerTarget(nominal_target,
+				SecondDrive_GetFastLimitReason(performance_clamped,
+						cross_corridor));
+}
+
+static void SecondDrive_IncrementU32(volatile uint32_t *value)
+{
+	if ((value != NULL) && (*value < UINT32_MAX)) {
+		(*value)++;
+	}
+}
+
+static void SecondDrive_AppendLimitTrace(uint16_t final_target_sps,
+		int16_t line_position, uint32_t average_step,
+		FirstDriveCoursePhase_t course_phase,
+		SecondDriveLimitReason_t reason)
+{
+	uint8_t index;
+	SecondDriveLimitTraceEntry_t *entry;
+
+	if (!planner_run_active) {
+		return;
+	}
+	if ((planner_run_stats.trace_count > 0U)
+			&& (planner_last_trace_reason == reason)
+			&& (planner_last_trace_source == planner_status.geometry_source)) {
+		return;
+	}
+	index = planner_run_stats.trace_head;
+	entry = (SecondDriveLimitTraceEntry_t *)&planner_run_stats.trace[index];
+	entry->step = average_step;
+	entry->segment_index = planner_status.segment_index;
+	entry->segment_type = planner_status.segment_type;
+	entry->phase = course_phase;
+	entry->reason = reason;
+	entry->geometry_source = planner_status.geometry_source;
+	entry->replay_turn_open = planner_replay_turn_open ? 1U : 0U;
+	entry->replay_turn_direction = planner_replay_turn_direction;
+	entry->requested_sps = planner_status.planner_target_sps;
+	entry->final_sps = final_target_sps;
+	entry->line_position = line_position;
+	planner_run_stats.trace_head = (uint8_t)((index + 1U)
+			% SECOND_DRIVE_LIMIT_TRACE_DEPTH);
+	if (planner_run_stats.trace_count < SECOND_DRIVE_LIMIT_TRACE_DEPTH) {
+		planner_run_stats.trace_count++;
+	}
+	planner_last_trace_reason = reason;
+	planner_last_trace_source = planner_status.geometry_source;
+}
+
+void SecondDrivePlanner_BeginRun(void)
+{
+	__disable_irq();
+	memset((void *)&planner_run_stats, 0, sizeof(planner_run_stats));
+	planner_run_active = true;
+	planner_last_trace_reason = SECOND_DRIVE_LIMIT_NONE;
+	planner_last_trace_source = planner_status.geometry_source;
+	__enable_irq();
+}
+
+void SecondDrivePlanner_RecordFinalTarget(uint16_t final_target_sps,
+		uint16_t actual_center_sps, int16_t line_position,
+		uint32_t average_step, FirstDriveCoursePhase_t course_phase,
+		bool recovery_slow)
+{
+	SecondDriveLimitReason_t reason = planner_status.limit_reason;
+
+	if (recovery_slow) {
+		reason = SECOND_DRIVE_LIMIT_RECOVERY;
+	}
+	if (reason >= SECOND_DRIVE_LIMIT_COUNT) {
+		reason = SECOND_DRIVE_LIMIT_SEGMENT_UNCERTAIN;
+	}
+	planner_status.final_target_sps = final_target_sps;
+	planner_status.limit_reason = reason;
+	if (!planner_run_active) {
+		return;
+	}
+	SecondDrive_IncrementU32(&planner_run_stats.control_samples);
+	planner_run_stats.center_sps_sum += actual_center_sps;
+	if (actual_center_sps > planner_run_stats.center_sps_max) {
+		planner_run_stats.center_sps_max = actual_center_sps;
+	}
+	if (final_target_sps > planner_run_stats.target_sps_max) {
+		planner_run_stats.target_sps_max = final_target_sps;
+	}
+	planner_run_stats.limiter_samples[reason]++;
+	SecondDrive_AppendLimitTrace(final_target_sps, line_position,
+			average_step, course_phase, reason);
+}
+
+void SecondDrivePlanner_RecordMarkerReject(
+		SecondDriveMarkerRejectReason_t reason)
+{
+	if (!planner_run_active) {
+		return;
+	}
+	switch (reason) {
+	case SECOND_DRIVE_MARKER_REJECT_NO_LINE:
+		SecondDrive_IncrementU16(&planner_run_stats.marker_reject_no_line_count);
+		break;
+	case SECOND_DRIVE_MARKER_REJECT_OFF_CENTER:
+		SecondDrive_IncrementU16(
+				&planner_run_stats.marker_reject_off_center_count);
+		break;
+	case SECOND_DRIVE_MARKER_REJECT_NO_CENTER_MASK:
+		SecondDrive_IncrementU16(
+				&planner_run_stats.marker_reject_no_center_mask_count);
+		break;
+	case SECOND_DRIVE_MARKER_REJECT_BRIDGE:
+		SecondDrive_IncrementU16(&planner_run_stats.marker_reject_bridge_count);
+		break;
+	default:
+		break;
+	}
+}
+
+bool SecondDrivePlanner_IsFinalEndCorridor(void)
+{
+	return planner_status.final_end_corridor != 0U;
+}
+
+void SecondDrivePlanner_RecordEndBrake(uint32_t step, uint16_t entry_sps)
+{
+	const TrackMarkerEvent_t *expected_event = NULL;
+	uint16_t event_count = Track_GetEventCount();
+
+	if (planner_expected_event_index < event_count) {
+		expected_event = Track_GetEvent(planner_expected_event_index);
+	}
+	/* A confirmed END is processed before FirstDrive_StopAtEndMarker(), and
+	 * the normal expected-event path advances the planner index past the final
+	 * BOTH event.  Preserve the finalized map's last event as the reference in
+	 * that case so the stop-distance diagnostic remains meaningful. */
+	if ((expected_event == NULL) && (event_count > 0U)) {
+		const TrackMarkerEvent_t *last_event =
+				Track_GetEvent((uint16_t)(event_count - 1U));
+
+		if ((last_event != NULL) && (last_event->type == MARKER_EVENT_BOTH)) {
+			expected_event = last_event;
+		}
+	}
+
+	if (!planner_run_active) {
+		return;
+	}
+	planner_run_stats.end_brake_step = step;
+	planner_run_stats.end_brake_entry_sps = entry_sps;
+	if (expected_event != NULL) {
+		planner_run_stats.expected_end_step = expected_event->center_step;
+		planner_run_stats.end_step_error = (int32_t)step
+				- (int32_t)expected_event->center_step;
+	}
+	if (planner_replay_turn_open
+			&& (planner_run_stats.unmatched_turn_at_end_count < UINT16_MAX)) {
+		planner_run_stats.unmatched_turn_at_end_count++;
+	}
+}
+
+void SecondDrivePlanner_RecordBrakeCompletion(uint16_t hold_ms,
+		bool completed)
+{
+	if (!planner_run_active) {
+		return;
+	}
+	planner_run_stats.brake_hold_ms = hold_ms;
+	planner_run_stats.end_brake_completed = completed ? 1U : 0U;
+}
+
+void SecondDrivePlanner_FinalizeRunStats(uint32_t elapsed_ms)
+{
+	if (!planner_run_active) {
+		return;
+	}
+	planner_run_stats.elapsed_ms = elapsed_ms;
+	planner_run_stats.valid = 1U;
+	planner_run_active = false;
+}
+
+void SecondDrivePlanner_GetRunStats(SecondDriveRunStats_t *stats)
+{
+	if (stats == NULL) {
+		return;
+	}
+	__disable_irq();
+	*stats = (const SecondDriveRunStats_t)planner_run_stats;
+	__enable_irq();
 }
 
 void SecondDrivePlanner_GetStatus(SecondDrivePlannerStatus_t *status)
@@ -687,6 +1459,26 @@ const SecondDriveConfig_t *SecondDrive_GetConfig(void)
 	return &second_drive_config;
 }
 
+uint16_t SecondDrive_GetEffectiveStraightSps(void)
+{
+	return second_drive_effective_straight_sps;
+}
+
+uint16_t SecondDrive_GetEffectiveCurveSps(void)
+{
+	return second_drive_effective_curve_sps;
+}
+
+uint16_t SecondDrive_GetEffectiveApproachSps(void)
+{
+	return second_drive_effective_approach_sps;
+}
+
+uint16_t SecondDrive_GetEffectiveExitSps(void)
+{
+	return second_drive_effective_exit_sps;
+}
+
 bool SecondDrive_SetStraightSps(uint16_t straight_sps)
 {
 	if (!SecondDrive_StateAllowsConfiguration(SecondDrive_GetState())
@@ -695,6 +1487,19 @@ bool SecondDrive_SetStraightSps(uint16_t straight_sps)
 		return false;
 	}
 	second_drive_config.straight_sps = straight_sps;
+	SecondDrive_RecomputeEffectiveProfile();
+	return true;
+}
+
+bool SecondDrive_SetCurveSps(uint16_t curve_sps)
+{
+	if (!SecondDrive_StateAllowsConfiguration(SecondDrive_GetState())
+			|| (curve_sps < SECOND_DRIVE_CURVE_MIN_SPS)
+			|| (curve_sps > SECOND_DRIVE_CURVE_MAX_SPS)) {
+		return false;
+	}
+	second_drive_config.curve_sps = curve_sps;
+	SecondDrive_RecomputeEffectiveProfile();
 	return true;
 }
 
@@ -706,5 +1511,6 @@ bool SecondDrive_SetOverallPercent(uint8_t overall_percent)
 		return false;
 	}
 	second_drive_config.overall_percent = overall_percent;
+	SecondDrive_RecomputeEffectiveProfile();
 	return true;
 }

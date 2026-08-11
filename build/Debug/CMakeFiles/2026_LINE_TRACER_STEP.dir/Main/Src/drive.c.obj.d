@@ -9,6 +9,8 @@ CMakeFiles/2026_LINE_TRACER_STEP.dir/Main/Src/drive.c.obj: \
  /Applications/ArmGNUToolchain/15.2.rel1/arm-none-eabi/arm-none-eabi/include/_newlib_version.h \
  /Applications/ArmGNUToolchain/15.2.rel1/arm-none-eabi/arm-none-eabi/include/sys/_intsup.h \
  /Applications/ArmGNUToolchain/15.2.rel1/arm-none-eabi/arm-none-eabi/include/sys/_stdint.h \
+ /Users/ehoi/STM32CubeIDE/line_tracer_2026/Main/./Inc/track.h \
+ /Users/ehoi/STM32CubeIDE/line_tracer_2026/Main/./Inc/marker.h \
  /Users/ehoi/STM32CubeIDE/line_tracer_2026/cmake/stm32cubemx/../../Core/Inc/main.h \
  /Users/ehoi/STM32CubeIDE/line_tracer_2026/cmake/stm32cubemx/../../Drivers/STM32H5xx_HAL_Driver/Inc/stm32h5xx_hal.h \
  /Users/ehoi/STM32CubeIDE/line_tracer_2026/cmake/stm32cubemx/../../Core/Inc/stm32h5xx_hal_conf.h \
@@ -73,8 +75,6 @@ CMakeFiles/2026_LINE_TRACER_STEP.dir/Main/Src/drive.c.obj: \
  /Users/ehoi/STM32CubeIDE/line_tracer_2026/Main/./Inc/motor.h \
  /Users/ehoi/STM32CubeIDE/line_tracer_2026/Main/./Inc/second_drive.h \
  /Users/ehoi/STM32CubeIDE/line_tracer_2026/Main/./Inc/drive.h \
- /Users/ehoi/STM32CubeIDE/line_tracer_2026/Main/./Inc/track.h \
- /Users/ehoi/STM32CubeIDE/line_tracer_2026/Main/./Inc/marker.h \
  /Users/ehoi/STM32CubeIDE/line_tracer_2026/Main/./Inc/sensor.h \
  /Users/ehoi/STM32CubeIDE/line_tracer_2026/cmake/stm32cubemx/../../Core/Inc/tim.h \
  /Users/ehoi/STM32CubeIDE/line_tracer_2026/cmake/stm32cubemx/../../Core/Inc/main.h \

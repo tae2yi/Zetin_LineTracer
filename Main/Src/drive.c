@@ -140,6 +140,48 @@ static uint32_t drive_edge_stuck_tick;
 static uint32_t drive_edge_best_position;
 static bool drive_edge_stuck_active;
 static int8_t drive_edge_stuck_side;
+static volatile bool drive_run_session_active;
+static volatile bool drive_run_record_finalized;
+static volatile FirstDriveRunRecord_t drive_run_record;
+static bool drive_start_tick_valid;
+static bool drive_second_brake_active;
+static uint32_t drive_second_brake_start_tick;
+static bool drive_loss_episode_active;
+static uint32_t drive_loss_episode_tick;
+static uint16_t drive_loss_episode_count;
+static uint16_t drive_recovery_success_count;
+static uint16_t drive_max_loss_ms;
+static uint32_t drive_lost_frame_count;
+static uint16_t drive_max_edge_dwell_normal_ms;
+static uint16_t drive_max_edge_dwell_turn_ms;
+static uint64_t drive_center_speed_sum_sps;
+static uint32_t drive_speed_sample_count;
+static uint16_t drive_center_speed_max_sps;
+static uint16_t drive_target_center_speed_max_sps;
+static uint16_t drive_left_speed_max_sps;
+static uint16_t drive_right_speed_max_sps;
+static uint16_t drive_marker_total_count;
+static uint16_t drive_marker_start_count;
+static uint16_t drive_marker_left_count;
+static uint16_t drive_marker_right_count;
+static uint16_t drive_marker_cross_count;
+static uint16_t drive_marker_end_count;
+static uint16_t drive_marker_unknown_count;
+
+static void FirstDrive_FinalizeRunRecord(FirstDriveStopReason_t reason,
+		FirstDriveFault_t fault);
+
+static void FirstDrive_FinalizeSecondDriveStats(uint32_t now,
+		uint16_t hold_ms, bool brake_completed)
+{
+	uint32_t elapsed_ms = 0U;
+
+	if (drive_start_tick_valid) {
+		elapsed_ms = now - drive_start_tick;
+	}
+	SecondDrivePlanner_RecordBrakeCompletion(hold_ms, brake_completed);
+	SecondDrivePlanner_FinalizeRunStats(elapsed_ms);
+}
 
 static bool Drive_HasCompletedMap(void)
 {
@@ -147,39 +189,304 @@ static bool Drive_HasCompletedMap(void)
 			&& SecondDrivePlanner_MapIsStructurallyValid();
 }
 
+static uint16_t FirstDrive_SaturateU16(uint32_t value)
+{
+	return (value > UINT16_MAX) ? UINT16_MAX : (uint16_t)value;
+}
+
+static void FirstDrive_ResetRunRuntime(void)
+{
+	drive_run_session_active = false;
+	drive_run_record_finalized = false;
+	drive_start_tick_valid = false;
+	memset((void *)&drive_run_record, 0, sizeof(drive_run_record));
+	drive_loss_episode_active = false;
+	drive_loss_episode_tick = 0U;
+	drive_loss_episode_count = 0U;
+	drive_recovery_success_count = 0U;
+	drive_max_loss_ms = 0U;
+	drive_lost_frame_count = 0U;
+	drive_max_edge_dwell_normal_ms = 0U;
+	drive_max_edge_dwell_turn_ms = 0U;
+	drive_center_speed_sum_sps = 0U;
+	drive_speed_sample_count = 0U;
+	drive_center_speed_max_sps = 0U;
+	drive_target_center_speed_max_sps = 0U;
+	drive_left_speed_max_sps = 0U;
+	drive_right_speed_max_sps = 0U;
+	drive_marker_total_count = 0U;
+	drive_marker_start_count = 0U;
+	drive_marker_left_count = 0U;
+	drive_marker_right_count = 0U;
+	drive_marker_cross_count = 0U;
+	drive_marker_end_count = 0U;
+	drive_marker_unknown_count = 0U;
+	drive_second_brake_active = false;
+	drive_second_brake_start_tick = 0U;
+}
+
+static void FirstDrive_StartLossEpisode(uint32_t now)
+{
+	if ((drive_run_mode != DRIVE_RUN_FIRST) || !drive_run_session_active
+			|| drive_run_record_finalized || drive_loss_episode_active) {
+		return;
+	}
+	drive_loss_episode_active = true;
+	drive_loss_episode_tick = now;
+	if (drive_loss_episode_count < UINT16_MAX) {
+		drive_loss_episode_count++;
+	}
+}
+
+static void FirstDrive_FinishLossEpisode(uint32_t now, bool recovered)
+{
+	uint32_t duration;
+
+	if ((drive_run_mode != DRIVE_RUN_FIRST) || !drive_run_session_active
+			|| drive_run_record_finalized || !drive_loss_episode_active) {
+		return;
+	}
+	duration = now - drive_loss_episode_tick;
+	if (duration > drive_max_loss_ms) {
+		drive_max_loss_ms = FirstDrive_SaturateU16(duration);
+	}
+	if (recovered && (drive_recovery_success_count < UINT16_MAX)) {
+		drive_recovery_success_count++;
+	}
+	drive_loss_episode_active = false;
+	drive_loss_episode_tick = 0U;
+}
+
+static void FirstDrive_RecordSpeedSampleValues(uint16_t centre_sps,
+		uint16_t target_centre_sps, uint16_t left_sps, uint16_t right_sps)
+{
+	if ((drive_run_mode != DRIVE_RUN_FIRST) || !drive_run_session_active
+			|| drive_run_record_finalized) {
+		return;
+	}
+	if (drive_speed_sample_count < UINT32_MAX) {
+		drive_speed_sample_count++;
+	}
+	drive_center_speed_sum_sps += centre_sps;
+	if (centre_sps > drive_center_speed_max_sps) {
+		drive_center_speed_max_sps = centre_sps;
+	}
+	if (target_centre_sps > drive_target_center_speed_max_sps) {
+		drive_target_center_speed_max_sps = target_centre_sps;
+	}
+	if (left_sps > drive_left_speed_max_sps) {
+		drive_left_speed_max_sps = left_sps;
+	}
+	if (right_sps > drive_right_speed_max_sps) {
+		drive_right_speed_max_sps = right_sps;
+	}
+}
+
+static void FirstDrive_RecordEdgeDwell(uint32_t dwell, bool confirmed_turn)
+{
+	uint16_t dwell_ms = FirstDrive_SaturateU16(dwell);
+
+	if ((drive_run_mode != DRIVE_RUN_FIRST) || !drive_run_session_active
+			|| drive_run_record_finalized) {
+		return;
+	}
+	if (confirmed_turn) {
+		if (dwell_ms > drive_max_edge_dwell_turn_ms) {
+			drive_max_edge_dwell_turn_ms = dwell_ms;
+		}
+	} else if (dwell_ms > drive_max_edge_dwell_normal_ms) {
+		drive_max_edge_dwell_normal_ms = dwell_ms;
+	}
+}
+
+static void FirstDrive_CaptureStopSnapshot(FirstDriveStopSnapshot_t *snapshot,
+		uint32_t center_step)
+{
+	if (snapshot == NULL) {
+		return;
+	}
+	memset(snapshot, 0, sizeof(*snapshot));
+	snapshot->center_step = center_step;
+	snapshot->elapsed_ms = drive_telemetry.elapsed_ms;
+	snapshot->state = drive_state;
+	snapshot->course_phase = drive_course_phase;
+	snapshot->sensor_mask = drive_telemetry.sensor_mask;
+	snapshot->raw_line_mask = drive_telemetry.raw_line_mask;
+	snapshot->line_mask = drive_telemetry.line_mask;
+	snapshot->marker_spill_mask = drive_telemetry.marker_spill_mask;
+	snapshot->last_valid_sensor_mask = drive_telemetry.last_valid_sensor_mask;
+	snapshot->last_valid_line_mask = drive_telemetry.last_valid_line_mask;
+	snapshot->line_position = drive_telemetry.line_position;
+	snapshot->last_valid_position = drive_telemetry.last_valid_position;
+	snapshot->p_term = drive_telemetry.p_term;
+	snapshot->d_term = drive_telemetry.d_term;
+	snapshot->steer = drive_telemetry.steer;
+	snapshot->target_steer_permille = drive_telemetry.target_steer_permille;
+	snapshot->applied_steer_permille = drive_telemetry.applied_steer_permille;
+	snapshot->steer_limit_permille = drive_telemetry.steer_limit_permille;
+	snapshot->base_sps = drive_telemetry.base_sps;
+	snapshot->target_centre_sps = drive_telemetry.target_centre_sps;
+	snapshot->current_centre_sps = drive_telemetry.centre_sps;
+	snapshot->left_sps = drive_telemetry.left_sps;
+	snapshot->right_sps = drive_telemetry.right_sps;
+	snapshot->line_lost_ms = drive_telemetry.line_lost_ms;
+	snapshot->line_lost_limit_ms = drive_telemetry.line_lost_limit_ms;
+	snapshot->edge_dwell_ms = drive_telemetry.edge_dwell_ms;
+	snapshot->bridge_recovery_direction =
+			drive_telemetry.bridge_recovery_direction;
+	snapshot->outer_boost_active = drive_telemetry.outer_boost_active;
+	if (drive_telemetry.marker_log_count > 0U) {
+		snapshot->last_marker = drive_telemetry.marker_log[0];
+	}
+	snapshot->control_irq_count = drive_control_irq_count;
+	snapshot->control_tick_count = drive_control_tick_count;
+}
+
+static void FirstDrive_FinalizeRunRecord(FirstDriveStopReason_t reason,
+		FirstDriveFault_t fault)
+{
+	FirstDriveRunRecord_t record;
+	TrackCollectorDiagnostics_t diagnostics;
+	uint32_t center_step;
+	uint32_t now;
+	bool map_valid;
+	uint8_t index;
+
+	if ((drive_run_mode != DRIVE_RUN_FIRST) || !drive_run_session_active
+			|| drive_run_record_finalized) {
+		return;
+	}
+
+	now = HAL_GetTick();
+	center_step = Motor_DriveGetAverageSteps();
+	drive_telemetry.average_steps = center_step;
+	if (drive_start_tick_valid) {
+		drive_telemetry.elapsed_ms = now - drive_start_tick;
+	}
+	FirstDrive_FinishLossEpisode(now, false);
+	Track_FinalizeSegments();
+	Track_GetCollectorDiagnostics(false, &diagnostics);
+	map_valid = (reason == FIRST_DRIVE_STOP_REASON_END_MARKER)
+			&& !Track_HasOverflow() && !Track_HasAnchorOverflow()
+			&& SecondDrivePlanner_MapIsStructurallyValid();
+	drive_map_ready = map_valid;
+
+	memset(&record, 0, sizeof(record));
+	record.valid = 1U;
+	record.stop_reason = reason;
+	record.fault = fault;
+	FirstDrive_CaptureStopSnapshot(&record.stop, center_step);
+	record.markers.total_count = drive_marker_total_count;
+	record.markers.start_count = drive_marker_start_count;
+	record.markers.left_count = drive_marker_left_count;
+	record.markers.right_count = drive_marker_right_count;
+	record.markers.cross_count = drive_marker_cross_count;
+	record.markers.end_count = drive_marker_end_count;
+	record.markers.unknown_count = drive_marker_unknown_count;
+	record.markers.segment_count = Track_GetSegmentCount();
+	record.markers.anchor_count = Track_GetCrossAnchorCount();
+	record.markers.tail_event_count = diagnostics.cross_tail_suppressed_count;
+	record.markers.tail_cross_count = diagnostics.cross_tail_affected_count;
+	record.markers.tail_max_gap_steps = diagnostics.max_cross_tail_gap_steps;
+	record.markers.end_guard_reject_count =
+		drive_telemetry.end_guard_reject_count;
+	record.markers.track_overflow = Track_HasOverflow() ? 1U : 0U;
+	record.markers.anchor_overflow = Track_HasAnchorOverflow() ? 1U : 0U;
+	record.markers.map_valid = map_valid ? 1U : 0U;
+	record.quality.loss_episode_count = drive_loss_episode_count;
+	record.quality.recovery_success_count = drive_recovery_success_count;
+	record.quality.max_loss_ms = drive_max_loss_ms;
+	record.quality.lost_frame_count = drive_lost_frame_count;
+	record.quality.max_edge_dwell_normal_ms =
+		drive_max_edge_dwell_normal_ms;
+	record.quality.max_edge_dwell_turn_ms = drive_max_edge_dwell_turn_ms;
+	record.speed.center_speed_sum_sps = drive_center_speed_sum_sps;
+	record.speed.sample_count = drive_speed_sample_count;
+	record.speed.center_max_sps = drive_center_speed_max_sps;
+	record.speed.target_center_max_sps = drive_target_center_speed_max_sps;
+	record.speed.left_max_sps = drive_left_speed_max_sps;
+	record.speed.right_max_sps = drive_right_speed_max_sps;
+	record.speed.base_sps = first_drive_config.base_sps;
+	record.speed.turn_sps = FIRST_DRIVE_TURN_MAX_SPS;
+	record.speed.cross_sps = FIRST_DRIVE_MARKER_SLOW_SPS;
+	record.speed.recovery_straight_sps =
+			FIRST_DRIVE_RECOVERY_STRAIGHT_SPS;
+	record.speed.recovery_turn_sps = FIRST_DRIVE_RECOVERY_TURN_SPS;
+	record.phase_log_count = drive_telemetry.phase_log_count;
+	record.marker_log_count = drive_telemetry.marker_log_count;
+	for (index = 0U; index < FIRST_DRIVE_PHASE_LOG_DEPTH; index++) {
+		record.phase_log[index] = drive_telemetry.phase_log[index];
+	}
+	for (index = 0U; index < FIRST_DRIVE_MARKER_LOG_DEPTH; index++) {
+		record.marker_log[index] = drive_telemetry.marker_log[index];
+	}
+	memcpy((void *)&drive_run_record, &record, sizeof(record));
+	drive_run_record_finalized = true;
+	drive_run_session_active = false;
+}
+
 static void FirstDrive_SetFault(FirstDriveFault_t fault)
 {
-	if (drive_run_mode == DRIVE_RUN_FIRST) {
-		drive_map_ready = false;
-	}
+	uint32_t now = HAL_GetTick();
+
 	drive_fault = fault;
 	drive_state = FIRST_DRIVE_FAULT;
-	drive_control_enabled = false;
-	Motor_DriveStop();
-	Sensor_Stop();
-	HAL_TIM_Base_Stop_IT(&htim7);
-
 	drive_telemetry.state = FIRST_DRIVE_FAULT;
 	drive_telemetry.fault = fault;
+	if (drive_run_mode == DRIVE_RUN_FIRST) {
+		drive_map_ready = false;
+		FirstDrive_FinalizeRunRecord(FIRST_DRIVE_STOP_REASON_FAULT, fault);
+	}
+	drive_control_enabled = false;
+	Motor_DriveStop();
+	if (drive_run_mode == DRIVE_RUN_SECOND) {
+		drive_second_brake_active = false;
+		FirstDrive_FinalizeSecondDriveStats(now, 0U, false);
+	}
+	Sensor_Stop();
+	HAL_TIM_Base_Stop_IT(&htim7);
 }
 
 static void FirstDrive_StopAtEndMarker(void)
 {
+	uint32_t now = HAL_GetTick();
+
 	drive_telemetry.end_candidate = 1U;
-	drive_control_enabled = false;
-	Motor_DriveStop();
-	Sensor_Stop();
-	HAL_TIM_Base_Stop_IT(&htim7);
+	drive_fault = FIRST_DRIVE_FAULT_NONE;
+	drive_telemetry.fault = FIRST_DRIVE_FAULT_NONE;
 	if (drive_run_mode == DRIVE_RUN_FIRST) {
-		Track_FinalizeSegments();
-		drive_map_ready = !Track_HasOverflow()
-				&& SecondDrivePlanner_MapIsStructurallyValid();
+		drive_state = FIRST_DRIVE_STOPPED;
+		drive_telemetry.state = FIRST_DRIVE_STOPPED;
+		FirstDrive_FinalizeRunRecord(FIRST_DRIVE_STOP_REASON_END_MARKER,
+				FIRST_DRIVE_FAULT_NONE);
+		drive_control_enabled = false;
+		Motor_DriveStop();
+		Sensor_Stop();
+		HAL_TIM_Base_Stop_IT(&htim7);
+	} else {
+		SecondDrivePlanner_RecordEndBrake(Motor_DriveGetAverageSteps(),
+				drive_telemetry.centre_sps);
+		drive_control_enabled = false;
+		Sensor_Stop();
+		HAL_TIM_Base_Stop_IT(&htim7);
+		if (SecondDrivePlanner_IsFinalEndCorridor()
+				&& Motor_DriveBrakeHoldStart(
+						MOTOR_VREF_DAC_BRAKE_HARD)) {
+			drive_second_brake_active = true;
+			drive_second_brake_start_tick = now;
+			drive_state = FIRST_DRIVE_RUNOUT;
+			drive_telemetry.state = FIRST_DRIVE_RUNOUT;
+		} else {
+			/* A confirmed END outside the validated final corridor remains a
+			 * normal safe stop; it must not receive the performance brake path. */
+			Motor_DriveStop();
+			drive_state = FIRST_DRIVE_STOPPED;
+			drive_telemetry.state = FIRST_DRIVE_STOPPED;
+			FirstDrive_FinalizeSecondDriveStats(now, 0U, false);
+		}
 	}
 
 	drive_current_base_sps = 0U;
-	drive_state = FIRST_DRIVE_STOPPED;
-	drive_telemetry.state = FIRST_DRIVE_STOPPED;
-	drive_telemetry.fault = FIRST_DRIVE_FAULT_NONE;
 	drive_telemetry.base_sps = 0U;
 	drive_telemetry.centre_sps = 0U;
 	drive_telemetry.target_centre_sps = 0U;
@@ -276,6 +583,82 @@ static bool FirstDrive_IsDefensiveCrossTail(
 			&& ((event->edge_union & MARKER_EDGE_MASK) != 0U);
 }
 
+static bool FirstDrive_IsEndMarkerEvent(const TrackMarkerEvent_t *event)
+{
+	return (event != NULL) && (event->type == MARKER_EVENT_BOTH)
+			&& !FirstDrive_IsDefensiveCrossTail(event)
+			&& (event->center_step >= FIRST_DRIVE_START_MARKER_IGNORE_STEPS)
+			&& (event->both_overlap_run >= TRACK_MARKER_MIN_OVERLAP)
+			&& (event->max_center_count < MARKER_WIDE_CENTER_COUNT)
+			&& (event->wide_center_run < MARKER_WIDE_MIN_FRAMES);
+}
+
+static FirstDriveMarkerClass_t FirstDrive_ClassifyMarkerEvent(
+		const TrackMarkerEvent_t *event)
+{
+	if (event == NULL) {
+		return FIRST_DRIVE_MARKER_CLASS_UNKNOWN;
+	}
+	switch (event->type) {
+	case MARKER_EVENT_EDGE_0:
+		return FIRST_DRIVE_MARKER_CLASS_LEFT;
+	case MARKER_EVENT_EDGE_7:
+		return FIRST_DRIVE_MARKER_CLASS_RIGHT;
+	case MARKER_EVENT_CROSS:
+		return FIRST_DRIVE_MARKER_CLASS_CROSS;
+	case MARKER_EVENT_BOTH:
+		if (event->center_step < FIRST_DRIVE_START_MARKER_IGNORE_STEPS) {
+			return FIRST_DRIVE_MARKER_CLASS_START;
+		}
+		return FirstDrive_IsEndMarkerEvent(event)
+				? FIRST_DRIVE_MARKER_CLASS_END
+				: FIRST_DRIVE_MARKER_CLASS_UNKNOWN;
+	default:
+		return FIRST_DRIVE_MARKER_CLASS_UNKNOWN;
+	}
+}
+
+static void FirstDrive_RecordPublishedMarker(
+		FirstDriveMarkerClass_t marker_class)
+{
+	if (drive_marker_total_count < UINT16_MAX) {
+		drive_marker_total_count++;
+	}
+	switch (marker_class) {
+	case FIRST_DRIVE_MARKER_CLASS_START:
+		if (drive_marker_start_count < UINT16_MAX) {
+			drive_marker_start_count++;
+		}
+		break;
+	case FIRST_DRIVE_MARKER_CLASS_LEFT:
+		if (drive_marker_left_count < UINT16_MAX) {
+			drive_marker_left_count++;
+		}
+		break;
+	case FIRST_DRIVE_MARKER_CLASS_RIGHT:
+		if (drive_marker_right_count < UINT16_MAX) {
+			drive_marker_right_count++;
+		}
+		break;
+	case FIRST_DRIVE_MARKER_CLASS_CROSS:
+		if (drive_marker_cross_count < UINT16_MAX) {
+			drive_marker_cross_count++;
+		}
+		break;
+	case FIRST_DRIVE_MARKER_CLASS_END:
+		if (drive_marker_end_count < UINT16_MAX) {
+			drive_marker_end_count++;
+		}
+		break;
+	case FIRST_DRIVE_MARKER_CLASS_UNKNOWN:
+	default:
+		if (drive_marker_unknown_count < UINT16_MAX) {
+			drive_marker_unknown_count++;
+		}
+		break;
+	}
+}
+
 static void FirstDrive_UpdateTrackDiagnostics(void)
 {
 	TrackCollectorDiagnostics_t diagnostics;
@@ -288,6 +671,10 @@ static void FirstDrive_UpdateTrackDiagnostics(void)
 			diagnostics.last_cross_tail_gap_steps;
 	drive_telemetry.last_cross_tail_edge_union =
 			diagnostics.last_cross_tail_edge_union;
+	drive_telemetry.cross_tail_affected_count =
+			diagnostics.cross_tail_affected_count;
+	drive_telemetry.max_cross_tail_gap_steps =
+			diagnostics.max_cross_tail_gap_steps;
 	FirstDrive_UpdateCrossTailGuard(drive_telemetry.average_steps);
 }
 
@@ -379,7 +766,8 @@ static void FirstDrive_RecordPhaseTransition(
 	}
 }
 
-static void FirstDrive_RecordMarkerEvent(const TrackMarkerEvent_t *event)
+static void FirstDrive_RecordMarkerEvent(const TrackMarkerEvent_t *event,
+		FirstDriveMarkerClass_t marker_class)
 {
 	uint8_t index;
 
@@ -390,12 +778,18 @@ static void FirstDrive_RecordMarkerEvent(const TrackMarkerEvent_t *event)
 		drive_telemetry.marker_log[index] =
 				drive_telemetry.marker_log[index - 1U];
 	}
+	drive_telemetry.marker_log[0].valid = 1U;
 	drive_telemetry.marker_log[0].type = (uint8_t)event->type;
+	drive_telemetry.marker_log[0].summary_type = (uint8_t)marker_class;
 	drive_telemetry.marker_log[0].confidence = event->confidence;
 	drive_telemetry.marker_log[0].edge_union = event->edge_union;
+	drive_telemetry.marker_log[0].full_union = event->full_union;
+	drive_telemetry.marker_log[0].entry_mask = event->entry_mask;
+	drive_telemetry.marker_log[0].exit_mask = event->exit_mask;
 	drive_telemetry.marker_log[0].step = event->center_step;
 	drive_telemetry.marker_log[0].entry_step = event->entry_step;
 	drive_telemetry.marker_log[0].exit_step = event->exit_step;
+	drive_telemetry.marker_log[0].center_step = event->center_step;
 	drive_telemetry.marker_log[0].max_center_count = event->max_center_count;
 	drive_telemetry.marker_log[0].wide_center_run = event->wide_center_run;
 	drive_telemetry.marker_log[0].both_overlap_run =
@@ -420,8 +814,12 @@ static void FirstDrive_RefreshMarkerEventLog(
 	}
 	entry->confidence = event->confidence;
 	entry->edge_union = event->edge_union;
+	entry->full_union = event->full_union;
+	entry->entry_mask = event->entry_mask;
+	entry->exit_mask = event->exit_mask;
 	entry->entry_step = event->entry_step;
 	entry->exit_step = event->exit_step;
+	entry->center_step = event->center_step;
 	entry->max_center_count = event->max_center_count;
 	entry->wide_center_run = event->wide_center_run;
 	entry->both_overlap_run = event->both_overlap_run;
@@ -625,8 +1023,25 @@ static uint8_t FirstDrive_GetMarkerEdges(
 {
 	uint8_t marker_edges;
 
-	if ((line == NULL) || !line->line_valid
-			|| (drive_bridge_recovery_direction != 0)) {
+	if (line == NULL) {
+		if (drive_run_mode == DRIVE_RUN_SECOND) {
+			SecondDrivePlanner_RecordMarkerReject(
+					SECOND_DRIVE_MARKER_REJECT_NO_LINE);
+		}
+		return 0U;
+	}
+	if (drive_bridge_recovery_direction != 0) {
+		if (drive_run_mode == DRIVE_RUN_SECOND) {
+			SecondDrivePlanner_RecordMarkerReject(
+					SECOND_DRIVE_MARKER_REJECT_BRIDGE);
+		}
+		return 0U;
+	}
+	if (!line->line_valid) {
+		if (drive_run_mode == DRIVE_RUN_SECOND) {
+			SecondDrivePlanner_RecordMarkerReject(
+					SECOND_DRIVE_MARKER_REJECT_NO_LINE);
+		}
 		return 0U;
 	}
 
@@ -634,9 +1049,19 @@ static uint8_t FirstDrive_GetMarkerEdges(
 	/* A direction marker must be beside a simultaneously visible, central
 	 * S1..S6 running line.  An S0/S7 response reached from outer S1/S6 is the
 	 * main line crossing the PCB's sensor-free bridge, not a marker. */
-	if ((FirstDrive_AbsolutePosition(line->position)
-			> FIRST_DRIVE_MARKER_CENTER_POS)
-			|| ((line->selected_mask & FIRST_DRIVE_MARKER_CENTER_MASK) == 0U)) {
+	if (FirstDrive_AbsolutePosition(line->position)
+			> FIRST_DRIVE_MARKER_CENTER_POS) {
+		if (drive_run_mode == DRIVE_RUN_SECOND) {
+			SecondDrivePlanner_RecordMarkerReject(
+					SECOND_DRIVE_MARKER_REJECT_OFF_CENTER);
+		}
+		return 0U;
+	}
+	if ((line->selected_mask & FIRST_DRIVE_MARKER_CENTER_MASK) == 0U) {
+		if (drive_run_mode == DRIVE_RUN_SECOND) {
+			SecondDrivePlanner_RecordMarkerReject(
+					SECOND_DRIVE_MARKER_REJECT_NO_CENTER_MASK);
+		}
 		return 0U;
 	}
 	return marker_edges;
@@ -663,6 +1088,8 @@ static void FirstDrive_ProcessMarker(const SensorLineMeasurement_t *line,
 	bool right_marker_now;
 	bool suppress_provisional;
 	int8_t event_direction = 0;
+	FirstDriveMarkerClass_t marker_class =
+			FIRST_DRIVE_MARKER_CLASS_UNKNOWN;
 
 	if ((drive_provisional_marker_direction != 0)
 			&& !FirstDrive_StepBefore(average_step,
@@ -736,13 +1163,17 @@ static void FirstDrive_ProcessMarker(const SensorLineMeasurement_t *line,
 		drive_telemetry.event_count++;
 	}
 	if (event != NULL) {
+		marker_class = FirstDrive_ClassifyMarkerEvent(event);
 		drive_telemetry.last_marker_type = (uint8_t)event->type;
 		drive_telemetry.last_marker_confidence = event->confidence;
 		drive_telemetry.last_marker_edge_union = event->edge_union;
 		if (process_result == TRACK_PROCESS_CROSS_TAIL_MERGED) {
 			FirstDrive_RefreshMarkerEventLog(event);
 		} else {
-			FirstDrive_RecordMarkerEvent(event);
+			FirstDrive_RecordMarkerEvent(event, marker_class);
+			if (drive_run_mode == DRIVE_RUN_FIRST) {
+				FirstDrive_RecordPublishedMarker(marker_class);
+			}
 		}
 	}
 	FirstDrive_UpdateTrackDiagnostics();
@@ -786,12 +1217,7 @@ static void FirstDrive_ProcessMarker(const SensorLineMeasurement_t *line,
 		}
 		/* The start and finish marks are bilateral.  Require real simultaneous
 		 * S0/S7 overlap so two unrelated one-sided events cannot end the run. */
-		if ((event->center_step >= FIRST_DRIVE_START_MARKER_IGNORE_STEPS)
-				&& (event->both_overlap_run
-						>= TRACK_MARKER_MIN_OVERLAP)
-				&& (event->max_center_count
-						< MARKER_WIDE_CENTER_COUNT)
-				&& (event->wide_center_run < MARKER_WIDE_MIN_FRAMES)) {
+		if (FirstDrive_IsEndMarkerEvent(event)) {
 			FirstDrive_StopAtEndMarker();
 		}
 		break;
@@ -931,6 +1357,7 @@ static bool FirstDrive_UpdateEdgeWatchdog(int32_t position, bool line_valid,
 			? UINT16_MAX : (uint16_t)dwell;
 	confirmed_turn = (drive_course_phase == FIRST_DRIVE_COURSE_TURN_LEFT)
 			|| (drive_course_phase == FIRST_DRIVE_COURSE_TURN_RIGHT);
+	FirstDrive_RecordEdgeDwell(dwell, confirmed_turn);
 	/* A constant-radius corner can legitimately hold S1/S6 for longer than a
 	 * fixed timer while the line remains valid and steering has the correct
 	 * turn phase.  Keep measuring the dwell for diagnostics, but let the
@@ -966,7 +1393,8 @@ static uint16_t FirstDrive_ClampSps(int32_t value)
 }
 
 static uint16_t FirstDrive_GetTargetBaseSps(int32_t position,
-		uint32_t average_step)
+		uint32_t average_step, bool line_valid, bool recovery_slow,
+		bool provisional_marker)
 {
 	uint32_t absolute_position;
 	uint16_t floor_sps;
@@ -1009,7 +1437,8 @@ static uint16_t FirstDrive_GetTargetBaseSps(int32_t position,
 	}
 	if (drive_run_mode == DRIVE_RUN_SECOND) {
 		result = SecondDrivePlanner_GetTargetSps(result, position,
-				drive_course_phase, average_step, drive_current_base_sps);
+				drive_course_phase, average_step, drive_current_base_sps,
+				line_valid, recovery_slow, provisional_marker);
 	}
 	return result;
 }
@@ -1130,6 +1559,7 @@ static bool FirstDrive_UpdateMotorCommand(const SensorLineMeasurement_t *line,
 			}
 			if (drive_line_reacquire_frames
 					>= FIRST_DRIVE_REACQUIRE_FRAMES) {
+				FirstDrive_FinishLossEpisode(now, true);
 				drive_line_lost_active = false;
 				drive_line_lost_frames = 0U;
 				drive_line_reacquire_frames = 0U;
@@ -1148,6 +1578,7 @@ static bool FirstDrive_UpdateMotorCommand(const SensorLineMeasurement_t *line,
 			drive_line_lost_tick = now;
 			drive_line_lost_frames = 0U;
 		}
+		FirstDrive_StartLossEpisode(now);
 		if (!drive_line_invalid_active) {
 			drive_line_invalid_active = true;
 			drive_line_invalid_tick = now;
@@ -1161,6 +1592,11 @@ static bool FirstDrive_UpdateMotorCommand(const SensorLineMeasurement_t *line,
 		}
 		drive_line_reacquire_frames = 0U;
 		drive_telemetry.lost_count++;
+		if ((drive_run_mode == DRIVE_RUN_FIRST) && drive_run_session_active
+				&& !drive_run_record_finalized
+				&& (drive_lost_frame_count < UINT32_MAX)) {
+			drive_lost_frame_count++;
+		}
 	}
 
 	if (!line->line_valid && (drive_bridge_recovery_direction != 0)) {
@@ -1263,7 +1699,9 @@ static bool FirstDrive_UpdateMotorCommand(const SensorLineMeasurement_t *line,
 				: -FIRST_DRIVE_STEER_RATIO_RECOVERY_Q15;
 	}
 
-	target_centre_sps = FirstDrive_GetTargetBaseSps(position, average_step);
+	target_centre_sps = FirstDrive_GetTargetBaseSps(position, average_step,
+			line->line_valid, recovery_slow,
+			drive_provisional_marker_direction != 0);
 	if (recovery_slow) {
 		uint16_t recovery_limit =
 				((FirstDrive_CourseDirection(drive_course_phase) != 0)
@@ -1325,12 +1763,20 @@ static bool FirstDrive_UpdateMotorCommand(const SensorLineMeasurement_t *line,
 			&& (drive_course_phase == FIRST_DRIVE_COURSE_STRAIGHT)) {
 		drive_state = FIRST_DRIVE_FOLLOW;
 	}
+	if (drive_run_mode == DRIVE_RUN_SECOND) {
+		SecondDrivePlanner_RecordFinalTarget(target_centre_sps,
+				(uint16_t)centre_sps, (int16_t)position, average_step,
+				drive_course_phase, recovery_slow);
+	}
 
 	if (!Motor_DriveSetSpeeds(drive_telemetry.left_sps,
 			drive_telemetry.right_sps)) {
 		FirstDrive_SetFault(FIRST_DRIVE_FAULT_MOTOR_COMMAND);
 		return false;
 	}
+	FirstDrive_RecordSpeedSampleValues(drive_telemetry.centre_sps,
+			drive_telemetry.target_centre_sps, drive_telemetry.left_sps,
+			drive_telemetry.right_sps);
 	return true;
 }
 
@@ -1374,6 +1820,8 @@ static bool FirstDrive_LaunchAfterCountdown(uint32_t now)
 	drive_edge_best_position = 0U;
 	drive_edge_stuck_active = false;
 	drive_edge_stuck_side = 0;
+	drive_second_brake_active = false;
+	drive_second_brake_start_tick = 0U;
 	drive_telemetry.edge_dwell_ms = 0U;
 
 	if (!Motor_DriveStart(FIRST_DRIVE_MOTOR_START_SPS,
@@ -1383,6 +1831,7 @@ static bool FirstDrive_LaunchAfterCountdown(uint32_t now)
 	}
 
 	drive_start_tick = now;
+	drive_start_tick_valid = true;
 	drive_state = FIRST_DRIVE_LAUNCH;
 	drive_telemetry.state = FIRST_DRIVE_LAUNCH;
 	drive_telemetry.countdown_ms = 0U;
@@ -1402,6 +1851,9 @@ static bool FirstDrive_LaunchAfterCountdown(uint32_t now)
 	drive_telemetry.base_sps = drive_current_base_sps;
 	drive_telemetry.centre_sps = drive_current_base_sps;
 	drive_telemetry.target_centre_sps = first_drive_config.base_sps;
+	FirstDrive_RecordSpeedSampleValues(drive_current_base_sps,
+			first_drive_config.base_sps, drive_current_base_sps,
+			drive_current_base_sps);
 	drive_watchdog_irq_count = drive_control_irq_count;
 	drive_watchdog_tick = now;
 	drive_control_enabled = true;
@@ -1529,6 +1981,9 @@ static bool Drive_InitCommon(DriveRunMode_t requested_mode)
 	Sensor_Stop();
 	Sensor_StateReset();
 	drive_run_mode = requested_mode;
+	drive_run_session_active = false;
+	drive_start_tick_valid = false;
+	drive_start_tick = 0U;
 	memset((void *)&drive_telemetry, 0, sizeof(drive_telemetry));
 	FirstDrive_ResetCrossTailGuard();
 	drive_state = FIRST_DRIVE_READY;
@@ -1568,6 +2023,8 @@ static bool Drive_InitCommon(DriveRunMode_t requested_mode)
 	drive_edge_best_position = 0U;
 	drive_edge_stuck_active = false;
 	drive_edge_stuck_side = 0;
+	drive_second_brake_active = false;
+	drive_second_brake_start_tick = 0U;
 	if (requested_mode == DRIVE_RUN_FIRST) {
 		Track_Reset();
 		drive_map_ready = false;
@@ -1652,12 +2109,18 @@ static bool Drive_StartCommon(DriveRunMode_t requested_mode)
 		FirstDrive_SetFault(FIRST_DRIVE_FAULT_NO_TRACK);
 		return false;
 	}
+	if (requested_mode == DRIVE_RUN_FIRST) {
+		FirstDrive_ResetRunRuntime();
+		drive_run_session_active = true;
+	}
 
 	Motor_DriveStop();
 	Sensor_Stop();
 	Sensor_StateReset();
 	Motor_DriveResetStepCounts();
 	drive_last_frame = 0U;
+	drive_start_tick = 0U;
+	drive_start_tick_valid = false;
 	drive_current_base_sps = FIRST_DRIVE_MOTOR_START_SPS;
 	drive_last_position = 0;
 	drive_last_control_position = 0;
@@ -1700,6 +2163,8 @@ static bool Drive_StartCommon(DriveRunMode_t requested_mode)
 	drive_edge_best_position = 0U;
 	drive_edge_stuck_active = false;
 	drive_edge_stuck_side = 0;
+	drive_second_brake_active = false;
+	drive_second_brake_start_tick = 0U;
 	if (requested_mode == DRIVE_RUN_FIRST) {
 		Track_Reset();
 		Track_SetStartIgnoreSteps(FIRST_DRIVE_START_MARKER_IGNORE_STEPS);
@@ -1707,6 +2172,7 @@ static bool Drive_StartCommon(DriveRunMode_t requested_mode)
 	} else {
 		Track_ReplayReset();
 		SecondDrivePlanner_Reset();
+		SecondDrivePlanner_BeginRun();
 	}
 
 	Sensor_SetLightMode(SENSOR_LIGHT_PAIR, 0U);
@@ -1797,13 +2263,29 @@ bool SecondDrive_Start(void)
 
 void FirstDrive_EmergencyStop(void)
 {
+	uint32_t now = HAL_GetTick();
+
 	if ((drive_run_mode == DRIVE_RUN_FIRST)
 			&& (drive_state != FIRST_DRIVE_STOPPED)) {
 		drive_map_ready = false;
 	}
+	if ((drive_run_mode == DRIVE_RUN_FIRST) && drive_run_session_active
+			&& !drive_run_record_finalized
+			&& (drive_state != FIRST_DRIVE_FAULT)) {
+		drive_fault = FIRST_DRIVE_FAULT_NONE;
+		drive_state = FIRST_DRIVE_STOPPED;
+		drive_telemetry.state = FIRST_DRIVE_STOPPED;
+		drive_telemetry.fault = FIRST_DRIVE_FAULT_NONE;
+		FirstDrive_FinalizeRunRecord(FIRST_DRIVE_STOP_REASON_MANUAL,
+				FIRST_DRIVE_FAULT_NONE);
+	}
 	drive_control_enabled = false;
 	HAL_TIM_Base_Stop_IT(&htim7);
 	Motor_DriveStop();
+	if (drive_run_mode == DRIVE_RUN_SECOND) {
+		drive_second_brake_active = false;
+		FirstDrive_FinalizeSecondDriveStats(now, 0U, false);
+	}
 	Sensor_Stop();
 	if (drive_state != FIRST_DRIVE_FAULT) {
 		drive_state = FIRST_DRIVE_STOPPED;
@@ -1832,6 +2314,21 @@ void FirstDrive_Process(void)
 {
 	uint32_t now = HAL_GetTick();
 	uint32_t irq_count;
+
+	Motor_DriveBrakeHoldProcess();
+	if ((drive_run_mode == DRIVE_RUN_SECOND)
+			&& (drive_state == FIRST_DRIVE_RUNOUT)
+			&& drive_second_brake_active
+			&& !Motor_DriveBrakeHoldIsActive()) {
+		uint16_t hold_ms = FirstDrive_SaturateU16(now
+				- drive_second_brake_start_tick);
+
+		drive_second_brake_active = false;
+		drive_state = FIRST_DRIVE_STOPPED;
+		drive_telemetry.state = FIRST_DRIVE_STOPPED;
+		drive_telemetry.fault = FIRST_DRIVE_FAULT_NONE;
+		FirstDrive_FinalizeSecondDriveStats(now, hold_ms, true);
+	}
 
 	if (drive_state == FIRST_DRIVE_COUNTDOWN) {
 		FirstDrive_UpdateCountdown(now);
@@ -1891,6 +2388,26 @@ void FirstDrive_GetTelemetry(FirstDriveTelemetry_t *telemetry)
 	__disable_irq();
 	*telemetry = (const FirstDriveTelemetry_t)drive_telemetry;
 	__enable_irq();
+}
+
+void FirstDrive_GetRunRecord(FirstDriveRunRecord_t *record)
+{
+	FirstDriveRunRecord_t copy;
+	uint64_t average;
+
+	if (record == NULL) {
+		return;
+	}
+	__disable_irq();
+	copy = (const FirstDriveRunRecord_t)drive_run_record;
+	__enable_irq();
+	if (copy.speed.sample_count > 0U) {
+		average = copy.speed.center_speed_sum_sps
+				/ copy.speed.sample_count;
+		copy.speed.center_avg_sps = (average > UINT16_MAX)
+				? UINT16_MAX : (uint16_t)average;
+	}
+	*record = copy;
 }
 
 void SecondDrive_GetTelemetry(SecondDriveTelemetry_t *telemetry)

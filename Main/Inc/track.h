@@ -34,6 +34,8 @@ typedef struct {
 	uint16_t edge7_run;
 	uint16_t both_overlap_run;
 	uint16_t wide_center_run;
+	uint8_t entry_mask;
+	uint8_t exit_mask;
 	uint32_t entry_frame;
 	uint32_t exit_frame;
 	uint32_t entry_step;
@@ -72,10 +74,20 @@ typedef enum {
 
 typedef struct {
 	uint16_t cross_tail_suppressed_count;
+	uint16_t cross_tail_affected_count;
 	uint32_t last_cross_tail_gap_steps;
+	uint32_t max_cross_tail_gap_steps;
 	uint8_t last_cross_tail_edge_union;
 	uint8_t cross_tail_pending;
 } TrackCollectorDiagnostics_t;
+
+typedef struct {
+	uint8_t turn_open;
+	int8_t turn_direction;
+	int8_t last_direction;
+	uint32_t last_direction_step;
+	uint8_t unmatched_turn_at_end;
+} TrackMapPairDiagnostics_t;
 
 void Track_Reset(void);
 void Track_SetStartIgnoreSteps(uint32_t minimum_step);
@@ -102,5 +114,6 @@ const TrackCrossAnchor_t *Track_FindCrossAnchorByEventIndex(
 bool Track_HasOverflow(void);
 bool Track_HasAnchorOverflow(void);
 void Track_FinalizeSegments(void);
+void Track_GetMapPairDiagnostics(TrackMapPairDiagnostics_t *diagnostics);
 
 #endif /* INC_TRACK_H_ */

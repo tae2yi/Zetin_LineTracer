@@ -51,7 +51,8 @@
 #define FIRST_DRIVE_ARM_TIMEOUT_MS 5000U
 #define FIRST_DRIVE_LINE_COUNT       5U
 #define FIRST_DRIVE_LINE_CHARS      37U
-#define FIRST_DRIVE_FAULT_PAGE_COUNT 4U
+#define FIRST_DRIVE_RESULT_GROUP_COUNT 3U
+#define FIRST_DRIVE_RESULT_PAGES_PER_GROUP 3U
 #define FIRST_DRIVE_PREVIEW_X        10U
 #define FIRST_DRIVE_PREVIEW_Y        62U
 #define FIRST_DRIVE_PREVIEW_WIDTH   220U
@@ -169,7 +170,14 @@ static uint32_t first_drive_update_tick = 0U;
 static uint32_t first_drive_preview_tick = 0U;
 static uint16_t first_drive_preview_marker_x = 0xFFFFU;
 static uint8_t first_drive_preview_valid = 0xFFU;
-static uint8_t first_drive_fault_page = 0U;
+typedef enum {
+	FIRST_DRIVE_RESULT_GROUP_SUMMARY = 0,
+	FIRST_DRIVE_RESULT_GROUP_MARKERS,
+	FIRST_DRIVE_RESULT_GROUP_DEBUG
+} FirstDriveResultGroup_t;
+
+static uint8_t first_drive_result_group = FIRST_DRIVE_RESULT_GROUP_SUMMARY;
+static uint8_t first_drive_result_page = 0U;
 static FirstDriveState_t first_drive_displayed_state = FIRST_DRIVE_OFF;
 static FirstDriveFault_t first_drive_displayed_fault = FIRST_DRIVE_FAULT_NONE;
 static char first_drive_displayed_lines[FIRST_DRIVE_LINE_COUNT]
@@ -180,6 +188,9 @@ static uint8_t first_drive_displayed_line_valid[FIRST_DRIVE_LINE_COUNT];
 static uint8_t second_drive_selected = 0U;
 static uint32_t second_drive_arm_tick = 0U;
 static uint32_t second_drive_update_tick = 0U;
+static uint8_t second_drive_result_page = 0U;
+static FirstDriveState_t second_drive_last_rendered_state = FIRST_DRIVE_OFF;
+static uint8_t second_drive_run_screen_locked = 0U;
 
 static void Menu_FillScreen(uint16_t color)
 {
@@ -316,6 +327,55 @@ static const char *Menu_FirstDriveFaultName(FirstDriveFault_t fault)
 	}
 }
 
+static const char *Menu_FirstDriveStopReasonName(FirstDriveStopReason_t reason)
+{
+	switch (reason) {
+	case FIRST_DRIVE_STOP_REASON_END_MARKER: return "END";
+	case FIRST_DRIVE_STOP_REASON_MANUAL: return "MANUAL";
+	case FIRST_DRIVE_STOP_REASON_FAULT: return "FAULT";
+	default: return "NONE";
+	}
+}
+
+static void Menu_FirstDriveFaultDetailText(FirstDriveFault_t fault,
+		char *text, size_t text_size)
+{
+	const char *name;
+
+	if ((text == NULL) || (text_size == 0U)) {
+		return;
+	}
+	switch (fault) {
+	case FIRST_DRIVE_FAULT_NONE: name = "NONE"; break;
+	case FIRST_DRIVE_FAULT_NO_CALIBRATION: name = "NO CALIBRATION"; break;
+	case FIRST_DRIVE_FAULT_START_NO_LINE: name = "START NO LINE"; break;
+	case FIRST_DRIVE_FAULT_SENSOR_STALE: name = "SENSOR STALE"; break;
+	case FIRST_DRIVE_FAULT_LINE_LOST: name = "LINE LOST"; break;
+	case FIRST_DRIVE_FAULT_MOTOR_COMMAND: name = "MOTOR COMMAND"; break;
+	case FIRST_DRIVE_FAULT_CONTROL_TIMER: name = "CONTROL TIMER"; break;
+	case FIRST_DRIVE_FAULT_TRACK_OVERFLOW: name = "TRACK OVERFLOW"; break;
+	case FIRST_DRIVE_FAULT_EDGE_STUCK: name = "EDGE STUCK"; break;
+	case FIRST_DRIVE_FAULT_NO_TRACK: name = "NO TRACK"; break;
+	default:
+		snprintf(text, text_size, "UNKNOWN FAULT %u", (unsigned int)fault);
+		return;
+	}
+	snprintf(text, text_size, "%s", name);
+}
+
+static const char *Menu_FirstDriveMarkerClassName(uint8_t marker_class)
+{
+	switch ((FirstDriveMarkerClass_t)marker_class) {
+	case FIRST_DRIVE_MARKER_CLASS_START: return "START";
+	case FIRST_DRIVE_MARKER_CLASS_LEFT: return "LEFT";
+	case FIRST_DRIVE_MARKER_CLASS_RIGHT: return "RIGHT";
+	case FIRST_DRIVE_MARKER_CLASS_CROSS: return "CROSS";
+	case FIRST_DRIVE_MARKER_CLASS_END: return "END";
+	case FIRST_DRIVE_MARKER_CLASS_UNKNOWN:
+	default: return "UNK";
+	}
+}
+
 static const char *Menu_FirstDriveCourseName(FirstDriveCoursePhase_t phase)
 {
 	switch (phase) {
@@ -327,35 +387,6 @@ static const char *Menu_FirstDriveCourseName(FirstDriveCoursePhase_t phase)
 	case FIRST_DRIVE_COURSE_EXIT_RIGHT: return "XR";
 	case FIRST_DRIVE_COURSE_CROSS: return "CR";
 	default: return "ST";
-	}
-}
-
-static const char *Menu_FirstDriveMarkerName(uint8_t marker_type)
-{
-	switch ((MarkerEventType_t)marker_type) {
-	case MARKER_EVENT_EDGE_0: return "E0";
-	case MARKER_EVENT_EDGE_7: return "E7";
-	case MARKER_EVENT_BOTH: return "BT";
-	case MARKER_EVENT_CROSS: return "CR";
-	case MARKER_EVENT_UNKNOWN: return "UN";
-	default: return "--";
-	}
-}
-
-static const char *Menu_FirstDrivePhaseReasonName(
-		FirstDrivePhaseReason_t reason)
-{
-	switch (reason) {
-	case FIRST_DRIVE_PHASE_REASON_MARKER_PROVISIONAL: return "MPR";
-	case FIRST_DRIVE_PHASE_REASON_MARKER_CONFIRMED: return "MCF";
-	case FIRST_DRIVE_PHASE_REASON_POSITION_ENTER: return "POS";
-	case FIRST_DRIVE_PHASE_REASON_APPROACH_EXPIRED: return "ATO";
-	case FIRST_DRIVE_PHASE_REASON_MARKER_EXIT: return "MEX";
-	case FIRST_DRIVE_PHASE_REASON_MARKER_STRAIGHT: return "MST";
-	case FIRST_DRIVE_PHASE_REASON_CROSS_MARKER: return "CMK";
-	case FIRST_DRIVE_PHASE_REASON_CROSS_EXPIRED: return "CTO";
-	case FIRST_DRIVE_PHASE_REASON_EXIT_CENTERED: return "CEN";
-	default: return "---";
 	}
 }
 
@@ -519,6 +550,274 @@ static void Menu_DrawFirstDriveLine(uint8_t index, uint16_t y,
 	first_drive_displayed_line_valid[index] = 1U;
 }
 
+static void Menu_SelectFirstDriveResult(FirstDriveState_t state)
+{
+	first_drive_result_group = (state == FIRST_DRIVE_FAULT)
+			? FIRST_DRIVE_RESULT_GROUP_DEBUG
+			: FIRST_DRIVE_RESULT_GROUP_SUMMARY;
+	first_drive_result_page = 0U;
+}
+
+static const char *Menu_FirstDriveResultNextGroupName(uint8_t group)
+{
+	switch (group) {
+	case FIRST_DRIVE_RESULT_GROUP_SUMMARY: return "MARKERS";
+	case FIRST_DRIVE_RESULT_GROUP_MARKERS: return "DEBUG";
+	default: return "SUMMARY";
+	}
+}
+
+static void Menu_DrawFirstDriveResultFooter(uint8_t group)
+{
+	char text[48];
+
+	snprintf(text, sizeof(text), "L/R PAGE C:%s",
+			Menu_FirstDriveResultNextGroupName(group));
+	Menu_DrawFirstDriveLine(4U, 110U, LCD_COLOR_CYAN, text);
+}
+
+static void Menu_RenderFirstDriveResult(const FirstDriveRunRecord_t *record)
+{
+	char text[48];
+	char fault_text[24];
+	uint8_t row;
+
+	if ((record == NULL) || (record->valid == 0U)) {
+		Menu_DrawFirstDriveLine(0U, 32U, LCD_COLOR_YELLOW,
+				"NO FINAL RUN RECORD");
+		Menu_DrawFirstDriveLine(1U, 53U, LCD_COLOR_GRAY,
+				"START A FIRST DRIVE RUN");
+		Menu_DrawFirstDriveLine(4U, 110U, LCD_COLOR_CYAN,
+				"HOLD C BACK");
+		return;
+	}
+	if (first_drive_result_group >= FIRST_DRIVE_RESULT_GROUP_COUNT) {
+		first_drive_result_group = FIRST_DRIVE_RESULT_GROUP_SUMMARY;
+	}
+	if (first_drive_result_page >= FIRST_DRIVE_RESULT_PAGES_PER_GROUP) {
+		first_drive_result_page = 0U;
+	}
+
+	switch (first_drive_result_group) {
+	case FIRST_DRIVE_RESULT_GROUP_SUMMARY:
+		if (first_drive_result_page == 0U) {
+			snprintf(text, sizeof(text), "SUMMARY 1/3 %s",
+					Menu_FirstDriveStopReasonName(record->stop_reason));
+			Menu_DrawFirstDriveLine(0U, 32U, LCD_COLOR_GREEN, text);
+			snprintf(text, sizeof(text), "TIME %lums STEP %lu",
+					(unsigned long)record->stop.elapsed_ms,
+					(unsigned long)record->stop.center_step);
+			Menu_DrawFirstDriveLine(1U, 53U, LCD_COLOR_WHITE, text);
+			snprintf(text, sizeof(text), "TOTAL %u CROSS %u END %u",
+					(unsigned int)record->markers.total_count,
+					(unsigned int)record->markers.cross_count,
+					(unsigned int)record->markers.end_count);
+			Menu_DrawFirstDriveLine(2U, 74U, LCD_COLOR_WHITE, text);
+			snprintf(text, sizeof(text), "SEG %u ANC %u MAP %s",
+					(unsigned int)record->markers.segment_count,
+					(unsigned int)record->markers.anchor_count,
+					record->markers.map_valid ? "OK" : "NO");
+			Menu_DrawFirstDriveLine(3U, 95U, LCD_COLOR_GREEN, text);
+			snprintf(text, sizeof(text), "UNK%u OVR%u/%u L/R C:MARKERS",
+					(unsigned int)record->markers.unknown_count,
+					(unsigned int)record->markers.track_overflow,
+					(unsigned int)record->markers.anchor_overflow);
+			Menu_DrawFirstDriveLine(4U, 110U, LCD_COLOR_CYAN, text);
+		} else if (first_drive_result_page == 1U) {
+			Menu_DrawFirstDriveLine(0U, 32U, LCD_COLOR_CYAN, "QUALITY 2/3");
+			snprintf(text, sizeof(text), "LOSS E%u MAX%ums REC%u",
+					(unsigned int)record->quality.loss_episode_count,
+					(unsigned int)record->quality.max_loss_ms,
+					(unsigned int)record->quality.recovery_success_count);
+			Menu_DrawFirstDriveLine(1U, 53U, LCD_COLOR_WHITE, text);
+			snprintf(text, sizeof(text), "LOSTF%lu EDGE N%u T%u",
+					(unsigned long)record->quality.lost_frame_count,
+					(unsigned int)record->quality.max_edge_dwell_normal_ms,
+					(unsigned int)record->quality.max_edge_dwell_turn_ms);
+			Menu_DrawFirstDriveLine(2U, 74U, LCD_COLOR_WHITE, text);
+			snprintf(text, sizeof(text), "TAIL E%u C%u REJ%u",
+					(unsigned int)record->markers.tail_event_count,
+					(unsigned int)record->markers.tail_cross_count,
+					(unsigned int)record->markers.end_guard_reject_count);
+			Menu_DrawFirstDriveLine(3U, 95U, LCD_COLOR_GRAY, text);
+			snprintf(text, sizeof(text), "UNK%u OVR%u/%u L/R C:MARKERS",
+					(unsigned int)record->markers.unknown_count,
+					(unsigned int)record->markers.track_overflow,
+					(unsigned int)record->markers.anchor_overflow);
+			Menu_DrawFirstDriveLine(4U, 110U, LCD_COLOR_CYAN, text);
+		} else {
+			Menu_DrawFirstDriveLine(0U, 32U, LCD_COLOR_CYAN, "SPEED 3/3 SPS");
+			snprintf(text, sizeof(text), "CTR A%u M%u TAR%u",
+					(unsigned int)record->speed.center_avg_sps,
+					(unsigned int)record->speed.center_max_sps,
+					(unsigned int)record->speed.target_center_max_sps);
+			Menu_DrawFirstDriveLine(1U, 53U, LCD_COLOR_GREEN, text);
+			snprintf(text, sizeof(text), "WHEEL L%u R%u N%lu",
+					(unsigned int)record->speed.left_max_sps,
+					(unsigned int)record->speed.right_max_sps,
+					(unsigned long)record->speed.sample_count);
+			Menu_DrawFirstDriveLine(2U, 74U, LCD_COLOR_WHITE, text);
+			snprintf(text, sizeof(text), "BASE%u TURN%u CROSS%u",
+					(unsigned int)record->speed.base_sps,
+					(unsigned int)record->speed.turn_sps,
+					(unsigned int)record->speed.cross_sps);
+			Menu_DrawFirstDriveLine(3U, 95U, LCD_COLOR_WHITE, text);
+			snprintf(text, sizeof(text), "REC S%u T%u C:MARKERS",
+					(unsigned int)record->speed.recovery_straight_sps,
+					(unsigned int)record->speed.recovery_turn_sps);
+			Menu_DrawFirstDriveLine(4U, 110U, LCD_COLOR_CYAN, text);
+		}
+		break;
+
+	case FIRST_DRIVE_RESULT_GROUP_MARKERS:
+		if (first_drive_result_page == 0U) {
+			Menu_DrawFirstDriveLine(0U, 32U, LCD_COLOR_CYAN, "MARKERS 1/3");
+			snprintf(text, sizeof(text), "START%u LEFT%u RIGHT%u",
+					(unsigned int)record->markers.start_count,
+					(unsigned int)record->markers.left_count,
+					(unsigned int)record->markers.right_count);
+			Menu_DrawFirstDriveLine(1U, 53U, LCD_COLOR_WHITE, text);
+			snprintf(text, sizeof(text), "CROSS%u END%u UNK%u",
+					(unsigned int)record->markers.cross_count,
+					(unsigned int)record->markers.end_count,
+					(unsigned int)record->markers.unknown_count);
+			Menu_DrawFirstDriveLine(2U, 74U, LCD_COLOR_WHITE, text);
+			snprintf(text, sizeof(text), "SEG%u ANC%u TOTAL%u",
+					(unsigned int)record->markers.segment_count,
+					(unsigned int)record->markers.anchor_count,
+					(unsigned int)record->markers.total_count);
+			Menu_DrawFirstDriveLine(3U, 95U, LCD_COLOR_GREEN, text);
+			Menu_DrawFirstDriveResultFooter(first_drive_result_group);
+		} else if (first_drive_result_page == 1U) {
+			Menu_DrawFirstDriveLine(0U, 32U, LCD_COLOR_CYAN,
+					"MARKERS 2/3 CROSS TAIL");
+			snprintf(text, sizeof(text), "CROSS%u ANCHOR%u",
+					(unsigned int)record->markers.cross_count,
+					(unsigned int)record->markers.anchor_count);
+			Menu_DrawFirstDriveLine(1U, 53U, LCD_COLOR_WHITE, text);
+			snprintf(text, sizeof(text), "TAIL E%u C%u GAP%lu/160",
+					(unsigned int)record->markers.tail_event_count,
+					(unsigned int)record->markers.tail_cross_count,
+					(unsigned long)record->markers.tail_max_gap_steps);
+			Menu_DrawFirstDriveLine(2U, 74U, LCD_COLOR_WHITE, text);
+			snprintf(text, sizeof(text), "END REJ%u MAP%u OVR%u/%u",
+					(unsigned int)record->markers.end_guard_reject_count,
+					(unsigned int)record->markers.map_valid,
+					(unsigned int)record->markers.track_overflow,
+					(unsigned int)record->markers.anchor_overflow);
+			Menu_DrawFirstDriveLine(3U, 95U, LCD_COLOR_GRAY, text);
+			Menu_DrawFirstDriveResultFooter(first_drive_result_group);
+		} else {
+			Menu_DrawFirstDriveLine(0U, 32U, LCD_COLOR_CYAN,
+					"MARKERS 3/3 NEW>OLD C:DEBUG");
+			for (row = 0U; row < 4U; row++) {
+				if (row < record->marker_log_count
+						&& record->marker_log[row].valid) {
+					const FirstDriveMarkerLogEntry_t *entry =
+							&record->marker_log[row];
+
+					snprintf(text, sizeof(text), "%u %s C%u S%lu",
+							(unsigned int)row,
+							Menu_FirstDriveMarkerClassName(entry->summary_type),
+							(unsigned int)entry->confidence,
+							(unsigned long)entry->center_step);
+				} else {
+					snprintf(text, sizeof(text), "%u -- NO EVENT --",
+							(unsigned int)row);
+				}
+				Menu_DrawFirstDriveLine((uint8_t)(row + 1U),
+						(uint16_t)(53U + ((uint16_t)row * 19U)),
+						(row == 0U) ? LCD_COLOR_YELLOW : LCD_COLOR_WHITE, text);
+			}
+		}
+		break;
+
+	case FIRST_DRIVE_RESULT_GROUP_DEBUG:
+	default:
+		if (first_drive_result_page == 0U) {
+			snprintf(text, sizeof(text), "DEBUG 1/3 STOP %s",
+					Menu_FirstDriveStopReasonName(record->stop_reason));
+			Menu_DrawFirstDriveLine(0U, 32U, LCD_COLOR_CYAN, text);
+			Menu_FirstDriveFaultDetailText(record->fault, fault_text,
+					sizeof(fault_text));
+			snprintf(text, sizeof(text), "FAULT %s", fault_text);
+			Menu_DrawFirstDriveLine(1U, 53U,
+					(record->fault == FIRST_DRIVE_FAULT_NONE)
+							? LCD_COLOR_GREEN : LCD_COLOR_RED, text);
+			snprintf(text, sizeof(text), "STATE %s PH%s",
+					Menu_FirstDriveStateName(record->stop.state),
+					Menu_FirstDriveCourseName(record->stop.course_phase));
+			Menu_DrawFirstDriveLine(2U, 74U, LCD_COLOR_WHITE, text);
+			snprintf(text, sizeof(text), "POS %+d LAST %+d M%02X",
+					(int)record->stop.line_position,
+					(int)record->stop.last_valid_position,
+					(unsigned int)record->stop.sensor_mask);
+			Menu_DrawFirstDriveLine(3U, 95U, LCD_COLOR_WHITE, text);
+			snprintf(text, sizeof(text), "LINE%02X MAP%u C:SUMMARY",
+					(unsigned int)record->stop.line_mask,
+					(unsigned int)record->markers.map_valid);
+			Menu_DrawFirstDriveLine(4U, 110U, LCD_COLOR_CYAN, text);
+		} else if (first_drive_result_page == 1U) {
+			Menu_DrawFirstDriveLine(0U, 32U, LCD_COLOR_CYAN, "DEBUG 2/3 CONTROL");
+			snprintf(text, sizeof(text), "P%+ld D%+ld ST%+ld",
+					(long)record->stop.p_term, (long)record->stop.d_term,
+					(long)record->stop.steer);
+			Menu_DrawFirstDriveLine(1U, 53U, LCD_COLOR_WHITE, text);
+			snprintf(text, sizeof(text), "U%+d/%+d LIM%u",
+					(int)record->stop.target_steer_permille,
+					(int)record->stop.applied_steer_permille,
+					(unsigned int)record->stop.steer_limit_permille);
+			Menu_DrawFirstDriveLine(2U, 74U, LCD_COLOR_WHITE, text);
+			snprintf(text, sizeof(text), "V%u>%u L/R%u/%u",
+					(unsigned int)record->stop.target_centre_sps,
+					(unsigned int)record->stop.current_centre_sps,
+					(unsigned int)record->stop.left_sps,
+					(unsigned int)record->stop.right_sps);
+			Menu_DrawFirstDriveLine(3U, 95U, LCD_COLOR_GREEN, text);
+			snprintf(text, sizeof(text), "LOSS%u/%u E%u B%c O%u",
+					(unsigned int)record->stop.line_lost_ms,
+					(unsigned int)record->stop.line_lost_limit_ms,
+					(unsigned int)record->stop.edge_dwell_ms,
+					(record->stop.bridge_recovery_direction < 0) ? 'L'
+							: ((record->stop.bridge_recovery_direction > 0) ? 'R' : '-'),
+					(unsigned int)record->stop.outer_boost_active);
+			Menu_DrawFirstDriveLine(4U, 110U, LCD_COLOR_CYAN, text);
+		} else {
+			const FirstDriveMarkerLogEntry_t *entry = &record->stop.last_marker;
+
+			Menu_DrawFirstDriveLine(0U, 32U, LCD_COLOR_CYAN,
+					"DEBUG 3/3 LAST MARK");
+			if (entry->valid) {
+				snprintf(text, sizeof(text), "%s C%u E%02X F%02X",
+						Menu_FirstDriveMarkerClassName(entry->summary_type),
+						(unsigned int)entry->confidence,
+						(unsigned int)entry->edge_union,
+						(unsigned int)entry->full_union);
+			} else {
+				snprintf(text, sizeof(text), "NO MARKER EVIDENCE");
+			}
+			Menu_DrawFirstDriveLine(1U, 53U, LCD_COLOR_WHITE, text);
+			snprintf(text, sizeof(text), "IN%02X OUT%02X S%lu",
+					(unsigned int)entry->entry_mask,
+					(unsigned int)entry->exit_mask,
+					(unsigned long)entry->center_step);
+			Menu_DrawFirstDriveLine(2U, 74U, LCD_COLOR_WHITE, text);
+			snprintf(text, sizeof(text), "TAIL E%u C%u G%lu",
+					(unsigned int)record->markers.tail_event_count,
+					(unsigned int)record->markers.tail_cross_count,
+					(unsigned long)record->markers.tail_max_gap_steps);
+			Menu_DrawFirstDriveLine(3U, 95U, LCD_COLOR_GRAY, text);
+			snprintf(text, sizeof(text), "REJ%u I%lu C%lu LF%lu",
+					(unsigned int)record->markers.end_guard_reject_count,
+					(unsigned long)record->stop.control_irq_count,
+					(unsigned long)record->stop.control_tick_count,
+					(unsigned long)record->quality.lost_frame_count);
+			Menu_DrawFirstDriveLine(4U, 110U, LCD_COLOR_CYAN, text);
+		}
+		break;
+	}
+}
+
 static void Menu_EnsureFirstDrivePreview(void)
 {
 	FirstDriveState_t state = FirstDrive_GetState();
@@ -641,6 +940,19 @@ static void Menu_RenderFirstDrive(bool redraw_layout)
 				(state == FIRST_DRIVE_FAULT) ? LCD_COLOR_RED : LCD_COLOR_GREEN,
 				LCD_COLOR_BLACK, Menu_FirstDriveStateName(state));
 	}
+	if ((state == FIRST_DRIVE_FAULT) || (state == FIRST_DRIVE_STOPPED)) {
+		FirstDriveRunRecord_t record;
+
+		if ((state != first_drive_displayed_state)
+				|| (fault != first_drive_displayed_fault)) {
+			Menu_SelectFirstDriveResult(state);
+		}
+		FirstDrive_GetRunRecord(&record);
+		Menu_RenderFirstDriveResult(&record);
+		first_drive_displayed_state = state;
+		first_drive_displayed_fault = fault;
+		return;
+	}
 
 	if ((state == FIRST_DRIVE_READY) || (state == FIRST_DRIVE_ARMED)) {
 		if (!Sensor_IsCalibrationComplete()) {
@@ -719,127 +1031,9 @@ static void Menu_RenderFirstDrive(bool redraw_layout)
 		Menu_DrawFirstDriveLine(3U, 89U, LCD_COLOR_GRAY, text);
 		Menu_DrawFirstDriveLine(4U, 110U, LCD_COLOR_YELLOW,
 				"CENTER PRESS = STOP");
-	} else if (((state == FIRST_DRIVE_FAULT)
-			|| (state == FIRST_DRIVE_STOPPED))
-			&& (first_drive_fault_page == 1U)) {
-		uint8_t log_index;
-		char provisional = (telemetry.provisional_marker_direction < 0)
-				? 'L' : ((telemetry.provisional_marker_direction > 0)
-						? 'R' : '-');
-
-		Menu_DrawFirstDriveLine(0U, 32U, LCD_COLOR_CYAN,
-				"PHASE LOG  L/R PAGE");
-		snprintf(text, sizeof(text), "MK%s C%u N%lu P%c E%02X",
-				Menu_FirstDriveMarkerName(telemetry.last_marker_type),
-				(unsigned int)telemetry.last_marker_confidence,
-				(unsigned long)telemetry.event_count,
-				provisional,
-				(unsigned int)telemetry.last_marker_edge_union);
-		Menu_DrawFirstDriveLine(1U, 53U, LCD_COLOR_GREEN, text);
-		for (log_index = 0U; log_index < FIRST_DRIVE_PHASE_LOG_DEPTH;
-				log_index++) {
-			if (log_index < telemetry.phase_log_count) {
-				const FirstDrivePhaseLogEntry_t *entry =
-						&telemetry.phase_log[log_index];
-
-				snprintf(text, sizeof(text), "%u %s>%s %s S%lu",
-						(unsigned int)log_index,
-						Menu_FirstDriveCourseName(entry->from_phase),
-						Menu_FirstDriveCourseName(entry->to_phase),
-						Menu_FirstDrivePhaseReasonName(entry->reason),
-						(unsigned long)entry->step);
-			} else {
-				snprintf(text, sizeof(text), "%u -- NO TRANSITION --",
-						(unsigned int)log_index);
-			}
-			Menu_DrawFirstDriveLine((uint8_t)(log_index + 2U),
-					(uint16_t)(74U + ((uint16_t)log_index * 18U)),
-					(log_index == 0U) ? LCD_COLOR_YELLOW : LCD_COLOR_WHITE,
-					text);
-		}
-	} else if (((state == FIRST_DRIVE_FAULT)
-			|| (state == FIRST_DRIVE_STOPPED))
-			&& (first_drive_fault_page >= 2U)) {
-		uint8_t first_index = (first_drive_fault_page == 2U) ? 0U : 3U;
-		uint8_t entry_count = (first_drive_fault_page == 2U) ? 3U : 2U;
-		uint8_t row;
-
-		Menu_DrawFirstDriveLine(0U, 30U, LCD_COLOR_CYAN,
-				(first_drive_fault_page == 2U)
-						? "MARK EVENTS 1/2  NEW>OLD"
-						: "MARK EVENTS 2/2  NEW>OLD");
-		for (row = 0U; row < entry_count; row++) {
-			uint8_t log_index = (uint8_t)(first_index + row);
-
-			if (log_index < telemetry.marker_log_count) {
-				const FirstDriveMarkerLogEntry_t *entry =
-						&telemetry.marker_log[log_index];
-
-				snprintf(text, sizeof(text), "%u %s C%u E%02X I%lu X%lu",
-						(unsigned int)log_index,
-						Menu_FirstDriveMarkerName(entry->type),
-						(unsigned int)entry->confidence,
-						(unsigned int)entry->edge_union,
-						(unsigned long)entry->entry_step,
-						(unsigned long)entry->exit_step);
-			} else {
-				snprintf(text, sizeof(text), "%u -- NO EVENT --",
-						(unsigned int)log_index);
-			}
-			Menu_DrawFirstDriveLine((uint8_t)(row + 1U),
-					(uint16_t)(50U + ((uint16_t)row * 18U)),
-					(log_index == 0U) ? LCD_COLOR_YELLOW : LCD_COLOR_WHITE,
-					text);
-		}
-		if (first_drive_fault_page == 2U) {
-			Menu_DrawFirstDriveLine(4U, 110U, LCD_COLOR_CYAN,
-					"L/R PAGE");
-		} else {
-			snprintf(text, sizeof(text), "TOTAL N%lu  L/R PAGE",
-					(unsigned long)telemetry.event_count);
-			Menu_DrawFirstDriveLine(3U, 92U, LCD_COLOR_GREEN, text);
-			Menu_DrawFirstDriveLine(4U, 110U, LCD_COLOR_CYAN,
-					"HOLD C BACK");
-		}
 	} else {
-		snprintf(text, sizeof(text), "%s  FAULT %s",
-				Menu_FirstDriveStateName(state), Menu_FirstDriveFaultName(fault));
-		Menu_DrawFirstDriveLine(0U, 32U,
-				(state == FIRST_DRIVE_FAULT) ? LCD_COLOR_RED : LCD_COLOR_GREEN,
-				text);
-		snprintf(text, sizeof(text), "LAST P%+5d L%02X NOW M%02X L%02X Q%02X",
-				(int)telemetry.last_valid_position,
-				(unsigned int)telemetry.last_valid_line_mask,
-				(unsigned int)telemetry.sensor_mask,
-				(unsigned int)telemetry.line_mask,
-				(unsigned int)telemetry.marker_spill_mask);
-		Menu_DrawFirstDriveLine(1U, 53U, LCD_COLOR_WHITE, text);
-		snprintf(text, sizeof(text), "PH%s V%u/%u U%+d/%+d",
-				Menu_FirstDriveCourseName(telemetry.course_phase),
-				(unsigned int)telemetry.target_centre_sps,
-				(unsigned int)telemetry.centre_sps,
-				(int)telemetry.target_steer_permille,
-				(int)telemetry.applied_steer_permille);
-		Menu_DrawFirstDriveLine(2U, 74U, LCD_COLOR_WHITE, text);
-		if (fault == FIRST_DRIVE_FAULT_EDGE_STUCK) {
-			snprintf(text, sizeof(text), "EDGE %u LR %u/%u",
-					(unsigned int)telemetry.edge_dwell_ms,
-					(unsigned int)telemetry.left_sps,
-					(unsigned int)telemetry.right_sps);
-		} else {
-			snprintf(text, sizeof(text), "LOSS %u/%u LR %u/%u",
-					(unsigned int)telemetry.line_lost_ms,
-					(unsigned int)telemetry.line_lost_limit_ms,
-					(unsigned int)telemetry.left_sps,
-					(unsigned int)telemetry.right_sps);
-		}
-		Menu_DrawFirstDriveLine(3U, 95U, LCD_COLOR_GRAY, text);
-		snprintf(text, sizeof(text), "TAIL N%u G%lu E%02X A%u",
-				(unsigned int)telemetry.cross_tail_suppressed_count,
-				(unsigned long)telemetry.last_cross_tail_gap_steps,
-				(unsigned int)telemetry.last_cross_tail_edge_union,
-				(unsigned int)telemetry.cross_tail_guard_active);
-		Menu_DrawFirstDriveLine(4U, 110U, LCD_COLOR_CYAN, text);
+		Menu_DrawFirstDriveLine(0U, 32U, LCD_COLOR_GRAY,
+				"FIRST DRIVE IDLE");
 	}
 	first_drive_displayed_state = state;
 	first_drive_displayed_fault = fault;
@@ -847,7 +1041,8 @@ static void Menu_RenderFirstDrive(bool redraw_layout)
 
 static void Menu_DrawFirstDrive(void)
 {
-	first_drive_fault_page = 0U;
+	first_drive_result_group = FIRST_DRIVE_RESULT_GROUP_SUMMARY;
+	first_drive_result_page = 0U;
 	first_drive_displayed_state = FIRST_DRIVE_OFF;
 	first_drive_displayed_fault = FIRST_DRIVE_FAULT_NONE;
 	Menu_FillScreen(LCD_COLOR_BLACK);
@@ -932,6 +1127,203 @@ static const char *Menu_SecondDriveMismatchName(
 	}
 }
 
+static bool Menu_SecondDriveIsLiveRunning(FirstDriveState_t state)
+{
+	return (state == FIRST_DRIVE_LAUNCH)
+			|| (state == FIRST_DRIVE_FOLLOW)
+			|| (state == FIRST_DRIVE_TURN_LEFT)
+			|| (state == FIRST_DRIVE_TURN_RIGHT)
+			|| (state == FIRST_DRIVE_CROSS_PASS)
+			|| (state == FIRST_DRIVE_END_CANDIDATE)
+			|| (state == FIRST_DRIVE_RUNOUT);
+}
+
+static const char *Menu_SecondDriveGeometryName(
+		SecondDriveGeometrySource_t source)
+{
+	switch (source) {
+	case SECOND_DRIVE_GEOMETRY_PAIR_OPEN: return "PAIR OPEN";
+	case SECOND_DRIVE_GEOMETRY_PAIR_CLOSE: return "PAIR";
+	case SECOND_DRIVE_GEOMETRY_CROSS_RESET: return "CROSS RESET";
+	case SECOND_DRIVE_GEOMETRY_LOCAL_CLOSE_REPAIR: return "LOCAL";
+	case SECOND_DRIVE_GEOMETRY_MAP_SEGMENT: return "MAP";
+	case SECOND_DRIVE_GEOMETRY_UNCERTAIN:
+	default: return "UNCERTAIN";
+	}
+}
+
+static const char *Menu_SecondDriveLimitName(SecondDriveLimitReason_t reason)
+{
+	switch (reason) {
+	case SECOND_DRIVE_LIMIT_FAST_STRAIGHT: return "FAST_STRAIGHT";
+	case SECOND_DRIVE_LIMIT_FAST_CROSS_APPROACH: return "FAST_CROSS_IN";
+	case SECOND_DRIVE_LIMIT_FAST_CROSS_EXIT: return "FAST_CROSS_OUT";
+	case SECOND_DRIVE_LIMIT_FAST_END_CORRIDOR: return "FAST_END";
+	case SECOND_DRIVE_LIMIT_FAST_LOCAL_CLOSE_REPAIR: return "FAST_LOCAL";
+	case SECOND_DRIVE_LIMIT_CURVE_APPROACH: return "CURVE_IN";
+	case SECOND_DRIVE_LIMIT_CURVE_CRUISE: return "CURVE";
+	case SECOND_DRIVE_LIMIT_CURVE_EXIT: return "CURVE_OUT";
+	case SECOND_DRIVE_LIMIT_MAP_INVALID: return "MAP_INVALID";
+	case SECOND_DRIVE_LIMIT_SEEK_CROSS: return "SEEK_CROSS";
+	case SECOND_DRIVE_LIMIT_SEGMENT_UNCERTAIN: return "UNCERTAIN";
+	case SECOND_DRIVE_LIMIT_MARKER_PAIR_UNCLOSED: return "PAIR_OPEN";
+	case SECOND_DRIVE_LIMIT_PHASE_NOT_STRAIGHT: return "PHASE";
+	case SECOND_DRIVE_LIMIT_POSITION: return "POSITION";
+	case SECOND_DRIVE_LIMIT_TURN_BRAKE: return "TURN_BRAKE";
+	case SECOND_DRIVE_LIMIT_RECOVERY: return "RECOVERY";
+	case SECOND_DRIVE_LIMIT_MAX_CLAMP: return "MAX_CLAMP";
+	case SECOND_DRIVE_LIMIT_END_BRAKE: return "END_BRAKE";
+	case SECOND_DRIVE_LIMIT_NONE:
+	default: return "NONE";
+	}
+}
+
+static uint32_t Menu_SecondDriveLimiterSum(const SecondDriveRunStats_t *stats,
+		SecondDriveLimitReason_t first, SecondDriveLimitReason_t last)
+{
+	uint32_t total = 0U;
+	SecondDriveLimitReason_t reason;
+
+	if (stats == NULL) {
+		return 0U;
+	}
+	for (reason = first; reason <= last; reason++) {
+		total += stats->limiter_samples[reason];
+	}
+	return total;
+}
+
+static uint32_t Menu_SecondDriveLimiterPercent(uint32_t count,
+		uint32_t total)
+{
+	return (total == 0U) ? 0U : ((count * 100U) / total);
+}
+
+static void Menu_RenderSecondDriveResult(const SecondDriveTelemetry_t *telemetry,
+		const SecondDriveRunStats_t *stats, uint8_t page)
+{
+	char text[56];
+	uint32_t total = 0U;
+	uint32_t fast;
+	uint32_t curve;
+	uint32_t brake;
+	uint32_t safe;
+	uint32_t position;
+	uint32_t recovery;
+	uint16_t average = 0U;
+	int8_t direction;
+
+	if ((telemetry == NULL) || (stats == NULL)) {
+		return;
+	}
+	ST7789_LCD_Driver.FillRect(&st7789_pObj, 4U, 24U,
+			MENU_SCREEN_WIDTH - 8U, 94U, LCD_COLOR_BLACK);
+	if (stats->control_samples > 0U) {
+		uint64_t average_sum = stats->center_sps_sum
+				/ stats->control_samples;
+		average = (average_sum > UINT16_MAX) ? UINT16_MAX
+				: (uint16_t)average_sum;
+	}
+	if (page == 0U) {
+		snprintf(text, sizeof(text), "SECOND DRIVE %s",
+				(telemetry->drive.state == FIRST_DRIVE_FAULT) ? "FAULT" : "END");
+		Menu_DrawText(8U, 27U, 16U,
+				(telemetry->drive.state == FIRST_DRIVE_FAULT)
+						? LCD_COLOR_RED : LCD_COLOR_GREEN,
+				LCD_COLOR_BLACK, text);
+		snprintf(text, sizeof(text), "TIME %lu.%01lus STEP %lu",
+				(unsigned long)(stats->elapsed_ms / 1000U),
+				(unsigned long)((stats->elapsed_ms % 1000U) / 100U),
+				(unsigned long)telemetry->drive.average_steps);
+		Menu_DrawText(8U, 50U, 12U, LCD_COLOR_WHITE, LCD_COLOR_BLACK, text);
+		snprintf(text, sizeof(text), "CTR AVG/MAX %u/%u",
+				(unsigned int)average,
+				(unsigned int)stats->center_sps_max);
+		Menu_DrawText(8U, 69U, 12U, LCD_COLOR_WHITE, LCD_COLOR_BLACK, text);
+		snprintf(text, sizeof(text), "SYNC M%u R%u FINAL %s",
+				(unsigned int)telemetry->planner.mismatch_count,
+				(unsigned int)telemetry->planner.resync_count,
+				Menu_SecondDriveSyncName(telemetry->planner.sync_state));
+		Menu_DrawText(8U, 88U, 12U, LCD_COLOR_CYAN, LCD_COLOR_BLACK, text);
+		Menu_DrawText(8U, 107U, 12U, LCD_COLOR_YELLOW, LCD_COLOR_BLACK,
+				"L/R PAGE  C HOLD:BACK");
+	} else if (page == 1U) {
+		for (direction = 0; direction < (int8_t)SECOND_DRIVE_LIMIT_COUNT;
+				direction++) {
+			total += stats->limiter_samples[(uint8_t)direction];
+		}
+		fast = stats->limiter_samples[SECOND_DRIVE_LIMIT_FAST_STRAIGHT]
+				+ stats->limiter_samples[SECOND_DRIVE_LIMIT_FAST_CROSS_APPROACH]
+				+ stats->limiter_samples[SECOND_DRIVE_LIMIT_FAST_CROSS_EXIT]
+				+ stats->limiter_samples[SECOND_DRIVE_LIMIT_FAST_END_CORRIDOR]
+				+ stats->limiter_samples[SECOND_DRIVE_LIMIT_FAST_LOCAL_CLOSE_REPAIR];
+		curve = Menu_SecondDriveLimiterSum(stats,
+				SECOND_DRIVE_LIMIT_CURVE_APPROACH,
+				SECOND_DRIVE_LIMIT_CURVE_EXIT);
+		brake = stats->limiter_samples[SECOND_DRIVE_LIMIT_TURN_BRAKE]
+				+ stats->limiter_samples[SECOND_DRIVE_LIMIT_END_BRAKE];
+		recovery = stats->limiter_samples[SECOND_DRIVE_LIMIT_RECOVERY];
+		position = stats->limiter_samples[SECOND_DRIVE_LIMIT_POSITION];
+		safe = stats->limiter_samples[SECOND_DRIVE_LIMIT_MAP_INVALID]
+				+ stats->limiter_samples[SECOND_DRIVE_LIMIT_SEEK_CROSS]
+				+ stats->limiter_samples[SECOND_DRIVE_LIMIT_SEGMENT_UNCERTAIN]
+				+ stats->limiter_samples[SECOND_DRIVE_LIMIT_MARKER_PAIR_UNCLOSED]
+				+ stats->limiter_samples[SECOND_DRIVE_LIMIT_PHASE_NOT_STRAIGHT];
+		Menu_DrawText(8U, 27U, 16U, LCD_COLOR_CYAN, LCD_COLOR_BLACK,
+				"SPEED LIMIT SHARE");
+		snprintf(text, sizeof(text), "FAST %lu%% CURVE %lu%%",
+				(unsigned long)Menu_SecondDriveLimiterPercent(fast, total),
+				(unsigned long)Menu_SecondDriveLimiterPercent(curve, total));
+		Menu_DrawText(8U, 50U, 12U, LCD_COLOR_WHITE, LCD_COLOR_BLACK, text);
+		snprintf(text, sizeof(text), "BRAKE %lu%% SAFE %lu%%",
+				(unsigned long)Menu_SecondDriveLimiterPercent(brake, total),
+				(unsigned long)Menu_SecondDriveLimiterPercent(safe, total));
+		Menu_DrawText(8U, 69U, 12U, LCD_COLOR_WHITE, LCD_COLOR_BLACK, text);
+		snprintf(text, sizeof(text), "POS %lu%% REC %lu%%",
+				(unsigned long)Menu_SecondDriveLimiterPercent(position, total),
+				(unsigned long)Menu_SecondDriveLimiterPercent(recovery, total));
+		Menu_DrawText(8U, 88U, 12U, LCD_COLOR_YELLOW, LCD_COLOR_BLACK, text);
+		snprintf(text, sizeof(text), "RAW %lu SAMPLES  MAX %u",
+				(unsigned long)total, (unsigned int)stats->target_sps_max);
+		Menu_DrawText(8U, 107U, 12U, LCD_COLOR_GRAY, LCD_COLOR_BLACK, text);
+	} else {
+		direction = telemetry->planner.replay_turn_direction;
+		snprintf(text, sizeof(text), "END BRAKE V%u %s",
+				(unsigned int)stats->end_brake_entry_sps,
+				stats->end_brake_completed ? "DONE" : "N/A");
+		Menu_DrawText(8U, 27U, 12U,
+				stats->end_brake_completed ? LCD_COLOR_GREEN : LCD_COLOR_YELLOW,
+				LCD_COLOR_BLACK, text);
+		snprintf(text, sizeof(text), "PAIR %s %s SRC %s",
+				telemetry->planner.replay_turn_open ? "OPEN" : "CLOSED",
+				(direction < 0) ? "L" : ((direction > 0) ? "R" : "-"),
+				Menu_SecondDriveGeometryName(telemetry->planner.geometry_source));
+		Menu_DrawText(8U, 46U, 12U,
+				telemetry->planner.replay_turn_open ? LCD_COLOR_RED : LCD_COLOR_GREEN,
+				LCD_COLOR_BLACK, text);
+		snprintf(text, sizeof(text), "LCR%u S%lu DIR %s",
+				(unsigned int)stats->local_close_repair_count,
+				(unsigned long)telemetry->planner.local_close_repair_step,
+				(telemetry->planner.local_close_repair_direction < 0) ? "L"
+						: ((telemetry->planner.local_close_repair_direction > 0)
+							? "R" : "-"));
+		Menu_DrawText(8U, 65U, 12U, LCD_COLOR_WHITE, LCD_COLOR_BLACK, text);
+		snprintf(text, sizeof(text), "EXP S%lu ERR%+ld",
+				(unsigned long)stats->expected_end_step,
+				(long)stats->end_step_error);
+		Menu_DrawText(8U, 84U, 12U, LCD_COLOR_WHITE, LCD_COLOR_BLACK, text);
+		snprintf(text, sizeof(text), "LAST %s REJ N%u O%u C%u B%u",
+				Menu_SecondDriveLimitName(telemetry->planner.limit_reason),
+				(unsigned int)stats->marker_reject_no_line_count,
+				(unsigned int)stats->marker_reject_off_center_count,
+				(unsigned int)stats->marker_reject_no_center_mask_count,
+				(unsigned int)stats->marker_reject_bridge_count);
+		Menu_DrawText(8U, 103U, 12U, LCD_COLOR_GRAY, LCD_COLOR_BLACK, text);
+		Menu_DrawText(8U, 119U, 10U, LCD_COLOR_YELLOW, LCD_COLOR_BLACK,
+				"L/R PAGE  C HOLD:BACK");
+	}
+}
+
 static void Menu_RenderSecondDrive(void)
 {
 	char text[48];
@@ -940,6 +1332,28 @@ static void Menu_RenderSecondDrive(void)
 	FirstDriveState_t state;
 	FirstDriveFault_t fault;
 
+	state = SecondDrive_GetState();
+	fault = SecondDrive_GetFault();
+	if (Menu_SecondDriveIsLiveRunning(state)) {
+		if (second_drive_run_screen_locked != 0U) {
+			second_drive_last_rendered_state = state;
+			return;
+		}
+		ST7789_LCD_Driver.FillRect(&st7789_pObj, 4U, 24U,
+				MENU_SCREEN_WIDTH - 8U, 94U, LCD_COLOR_BLACK);
+		Menu_DrawText(8U, 31U, 16U, LCD_COLOR_GREEN, LCD_COLOR_BLACK,
+				"SECOND DRIVE RUNNING");
+		Menu_DrawText(8U, 58U, 16U, LCD_COLOR_CYAN, LCD_COLOR_BLACK,
+				"DISPLAY UPDATE LOCKED");
+		Menu_DrawText(8U, 87U, 12U, LCD_COLOR_YELLOW, LCD_COLOR_BLACK,
+				"CENTER = EMERGENCY STOP");
+		Menu_DrawText(8U, MENU_FOOTER_Y, 12U, LCD_COLOR_CYAN,
+				LCD_COLOR_BLACK, "HOLD C TO GO BACK");
+		second_drive_run_screen_locked = 1U;
+		second_drive_last_rendered_state = state;
+		return;
+	}
+	second_drive_run_screen_locked = 0U;
 	SecondDrive_GetTelemetry(&telemetry);
 	state = telemetry.drive.state;
 	fault = telemetry.drive.fault;
@@ -947,9 +1361,18 @@ static void Menu_RenderSecondDrive(void)
 			MENU_SCREEN_WIDTH - 8U, 94U, LCD_COLOR_BLACK);
 	ST7789_LCD_Driver.FillRect(&st7789_pObj, 154U, 1U,
 			82U, 18U, LCD_COLOR_BLACK);
-	Menu_DrawText(160U, 4U, 12U,
-			(state == FIRST_DRIVE_FAULT) ? LCD_COLOR_RED : LCD_COLOR_GREEN,
-			LCD_COLOR_BLACK, Menu_FirstDriveStateName(state));
+		Menu_DrawText(160U, 4U, 12U,
+				(state == FIRST_DRIVE_FAULT) ? LCD_COLOR_RED : LCD_COLOR_GREEN,
+				LCD_COLOR_BLACK, Menu_FirstDriveStateName(state));
+	if ((state == FIRST_DRIVE_STOPPED) || (state == FIRST_DRIVE_FAULT)) {
+		SecondDriveRunStats_t stats;
+
+		SecondDrivePlanner_GetRunStats(&stats);
+		Menu_RenderSecondDriveResult(&telemetry, &stats,
+				second_drive_result_page);
+		second_drive_last_rendered_state = state;
+		return;
+	}
 
 	if ((state == FIRST_DRIVE_READY) || (state == FIRST_DRIVE_ARMED)) {
 		uint16_t straight_fg = ((state == FIRST_DRIVE_READY)
@@ -958,11 +1381,17 @@ static void Menu_RenderSecondDrive(void)
 		uint16_t straight_bg = ((state == FIRST_DRIVE_READY)
 				&& (second_drive_selected == 0U))
 				? LCD_COLOR_CYAN : LCD_COLOR_BLACK;
-		uint16_t overall_fg = ((state == FIRST_DRIVE_READY)
+		uint16_t curve_fg = ((state == FIRST_DRIVE_READY)
 				&& (second_drive_selected == 1U))
 				? LCD_COLOR_BLACK : LCD_COLOR_WHITE;
-		uint16_t overall_bg = ((state == FIRST_DRIVE_READY)
+		uint16_t curve_bg = ((state == FIRST_DRIVE_READY)
 				&& (second_drive_selected == 1U))
+				? LCD_COLOR_CYAN : LCD_COLOR_BLACK;
+		uint16_t overall_fg = ((state == FIRST_DRIVE_READY)
+				&& (second_drive_selected == 2U))
+				? LCD_COLOR_BLACK : LCD_COLOR_WHITE;
+		uint16_t overall_bg = ((state == FIRST_DRIVE_READY)
+				&& (second_drive_selected == 2U))
 				? LCD_COLOR_CYAN : LCD_COLOR_BLACK;
 
 		snprintf(text, sizeof(text), "%s E%u S%u A%u",
@@ -974,27 +1403,39 @@ static void Menu_RenderSecondDrive(void)
 				(telemetry.planner.sync_state == SECOND_DRIVE_SYNC_MAP)
 						? LCD_COLOR_GREEN : LCD_COLOR_RED,
 				LCD_COLOR_BLACK, text);
-		ST7789_LCD_Driver.FillRect(&st7789_pObj, 6U, 43U,
-				228U, 23U, straight_bg);
-		snprintf(text, sizeof(text), "STRAIGHT  %4u SPS",
-				(unsigned int)config->straight_sps);
-		Menu_DrawText(12U, 47U, 16U, straight_fg, straight_bg, text);
-		ST7789_LCD_Driver.FillRect(&st7789_pObj, 6U, 70U,
-				228U, 23U, overall_bg);
-		snprintf(text, sizeof(text), "ALL SPEED   %3u %%",
+		ST7789_LCD_Driver.FillRect(&st7789_pObj, 6U, 41U,
+				228U, 20U, straight_bg);
+		snprintf(text, sizeof(text), "STRAIGHT B%u E%u%s",
+				(unsigned int)config->straight_sps,
+				(unsigned int)SecondDrive_GetEffectiveStraightSps(),
+				(SecondDrive_GetEffectiveStraightSps()
+						>= SECOND_DRIVE_PERFORMANCE_MAX_CENTER_SPS
+						&& (config->straight_sps * config->overall_percent
+								> SECOND_DRIVE_PERFORMANCE_MAX_CENTER_SPS * 100U))
+						? " MAX" : "");
+		Menu_DrawText(10U, 44U, 12U, straight_fg, straight_bg, text);
+		ST7789_LCD_Driver.FillRect(&st7789_pObj, 6U, 64U,
+				228U, 20U, curve_bg);
+		snprintf(text, sizeof(text), "CURVE    B%u E%u",
+				(unsigned int)config->curve_sps,
+				(unsigned int)SecondDrive_GetEffectiveCurveSps());
+		Menu_DrawText(10U, 67U, 12U, curve_fg, curve_bg, text);
+		ST7789_LCD_Driver.FillRect(&st7789_pObj, 6U, 87U,
+				228U, 20U, overall_bg);
+		snprintf(text, sizeof(text), "ALL SPEED %3u%%",
 				(unsigned int)config->overall_percent);
-		Menu_DrawText(12U, 74U, 16U, overall_fg, overall_bg, text);
+		Menu_DrawText(10U, 90U, 12U, overall_fg, overall_bg, text);
 		if (!Sensor_IsCalibrationComplete()) {
-			Menu_DrawText(8U, 101U, 12U, LCD_COLOR_RED, LCD_COLOR_BLACK,
+			Menu_DrawText(8U, 108U, 12U, LCD_COLOR_RED, LCD_COLOR_BLACK,
 					"CAL REQUIRED - C OPEN CAL");
 		} else if (state == FIRST_DRIVE_ARMED) {
-			Menu_DrawText(8U, 101U, 12U, LCD_COLOR_YELLOW, LCD_COLOR_BLACK,
+			Menu_DrawText(8U, 108U, 12U, LCD_COLOR_YELLOW, LCD_COLOR_BLACK,
 					"ARMED - C START  AUTO CANCEL 5S");
-		} else if (second_drive_selected == 0U) {
-			Menu_DrawText(8U, 101U, 12U, LCD_COLOR_CYAN, LCD_COLOR_BLACK,
+		} else if (second_drive_selected < 2U) {
+			Menu_DrawText(8U, 108U, 12U, LCD_COLOR_CYAN, LCD_COLOR_BLACK,
 					"L/R ADJUST   C NEXT");
 		} else {
-			Menu_DrawText(8U, 101U, 12U, LCD_COLOR_CYAN, LCD_COLOR_BLACK,
+			Menu_DrawText(8U, 108U, 12U, LCD_COLOR_CYAN, LCD_COLOR_BLACK,
 					"L/R ADJUST   C ARM");
 		}
 	} else if (state == FIRST_DRIVE_COUNTDOWN) {
@@ -1099,10 +1540,15 @@ static void Menu_RenderSecondDrive(void)
 	}
 	Menu_DrawText(8U, MENU_FOOTER_Y, 12U,
 			LCD_COLOR_CYAN, LCD_COLOR_BLACK, "HOLD C TO GO BACK");
+	second_drive_last_rendered_state = state;
 }
 
 static void Menu_DrawSecondDrive(void)
 {
+	second_drive_selected = 0U;
+	second_drive_result_page = 0U;
+	second_drive_last_rendered_state = FIRST_DRIVE_OFF;
+	second_drive_run_screen_locked = 0U;
 	Menu_FillScreen(LCD_COLOR_BLACK);
 	Menu_DrawText(8U, 2U, 16U,
 			LCD_COLOR_CYAN, LCD_COLOR_BLACK, "8. SECOND DRIVE");
@@ -1129,6 +1575,17 @@ static void Menu_ChangeSecondDriveSetting(int8_t direction)
 			value = SECOND_DRIVE_STRAIGHT_MAX_SPS;
 		}
 		(void)SecondDrive_SetStraightSps((uint16_t)value);
+	} else if (second_drive_selected == 1U) {
+		int32_t value = config->curve_sps
+				+ ((direction < 0) ? -(int32_t)SECOND_DRIVE_CURVE_STEP_SPS
+						: (int32_t)SECOND_DRIVE_CURVE_STEP_SPS);
+
+		if (value < SECOND_DRIVE_CURVE_MIN_SPS) {
+			value = SECOND_DRIVE_CURVE_MIN_SPS;
+		} else if (value > SECOND_DRIVE_CURVE_MAX_SPS) {
+			value = SECOND_DRIVE_CURVE_MAX_SPS;
+		}
+		(void)SecondDrive_SetCurveSps((uint16_t)value);
 	} else {
 		int32_t value = config->overall_percent
 				+ ((direction < 0)
@@ -1148,17 +1605,27 @@ static void Menu_ChangeSecondDriveSetting(int8_t direction)
 static void Menu_UpdateSecondDrive(void)
 {
 	uint32_t now = HAL_GetTick();
+	FirstDriveState_t state = SecondDrive_GetState();
 
-	if ((SecondDrive_GetState() == FIRST_DRIVE_ARMED)
+	if ((state == FIRST_DRIVE_ARMED)
 			&& ((now - second_drive_arm_tick)
 					>= SECOND_DRIVE_ARM_TIMEOUT_MS)) {
 		(void)SecondDrive_Init();
 		second_drive_selected = 0U;
+		second_drive_run_screen_locked = 0U;
 		Menu_RenderSecondDrive();
 		second_drive_update_tick = now;
 		return;
 	}
-	if ((now - second_drive_update_tick) >= SECOND_DRIVE_UPDATE_MS) {
+	if (state != second_drive_last_rendered_state) {
+		/* A live transition is rendered once; the renderer itself owns the
+		 * static running screen and refuses all later periodic redraws. */
+		Menu_RenderSecondDrive();
+		second_drive_update_tick = now;
+		return;
+	}
+	if ((state == FIRST_DRIVE_COUNTDOWN)
+			&& ((now - second_drive_update_tick) >= SECOND_DRIVE_UPDATE_MS)) {
 		second_drive_update_tick = now;
 		Menu_RenderSecondDrive();
 	}
@@ -2865,19 +3332,27 @@ void Main_Menu(void)
 			Menu_RenderFirstDrive(true);
 		} else if (((first_state == FIRST_DRIVE_FAULT)
 				|| (first_state == FIRST_DRIVE_STOPPED))
+				&& (input == INPUT_CMD_K_SINGLE)) {
+			first_drive_result_group = (uint8_t)
+					((first_drive_result_group + 1U)
+							% FIRST_DRIVE_RESULT_GROUP_COUNT);
+			first_drive_result_page = 0U;
+			Menu_RenderFirstDrive(true);
+		} else if (((first_state == FIRST_DRIVE_FAULT)
+				|| (first_state == FIRST_DRIVE_STOPPED))
 				&& ((input == INPUT_CMD_L_SINGLE)
 						|| (input == INPUT_CMD_L_HOLD)
 						|| (input == INPUT_CMD_R_SINGLE)
 						|| (input == INPUT_CMD_R_HOLD))) {
 			if ((input == INPUT_CMD_L_SINGLE)
 					|| (input == INPUT_CMD_L_HOLD)) {
-				first_drive_fault_page = (first_drive_fault_page == 0U)
-						? (FIRST_DRIVE_FAULT_PAGE_COUNT - 1U)
-						: (uint8_t)(first_drive_fault_page - 1U);
+				first_drive_result_page = (first_drive_result_page == 0U)
+						? (FIRST_DRIVE_RESULT_PAGES_PER_GROUP - 1U)
+						: (uint8_t)(first_drive_result_page - 1U);
 			} else {
-				first_drive_fault_page = (uint8_t)
-						((first_drive_fault_page + 1U)
-								% FIRST_DRIVE_FAULT_PAGE_COUNT);
+				first_drive_result_page = (uint8_t)
+						((first_drive_result_page + 1U)
+								% FIRST_DRIVE_RESULT_PAGES_PER_GROUP);
 			}
 			Menu_RenderFirstDrive(true);
 		} else if (input == INPUT_CMD_K_HOLD) {
@@ -2923,16 +3398,31 @@ void Main_Menu(void)
 			SecondDrive_EmergencyStop();
 			Button_IgnoreCenterUntilRelease();
 			Menu_RenderSecondDrive();
-		} else if (input == INPUT_CMD_K_HOLD) {
-			if (Menu_FirstDriveIsActive(second_state)) {
-				SecondDrive_EmergencyStop();
+			} else if (input == INPUT_CMD_K_HOLD) {
+				if (Menu_FirstDriveIsActive(second_state)) {
+					SecondDrive_EmergencyStop();
+					Menu_RenderSecondDrive();
+				} else {
+					SecondDrive_Stop();
+					current_view = MENU_VIEW_MAIN;
+					Menu_DrawMain();
+				}
+			} else if (((second_state == FIRST_DRIVE_STOPPED)
+					|| (second_state == FIRST_DRIVE_FAULT))
+					&& ((input == INPUT_CMD_L_SINGLE)
+							|| (input == INPUT_CMD_L_HOLD)
+							|| (input == INPUT_CMD_R_SINGLE)
+							|| (input == INPUT_CMD_R_HOLD))) {
+				if ((input == INPUT_CMD_L_SINGLE)
+						|| (input == INPUT_CMD_L_HOLD)) {
+					second_drive_result_page = (second_drive_result_page == 0U)
+							? 2U : (uint8_t)(second_drive_result_page - 1U);
+				} else {
+					second_drive_result_page = (uint8_t)
+							((second_drive_result_page + 1U) % 3U);
+				}
 				Menu_RenderSecondDrive();
-			} else {
-				SecondDrive_Stop();
-				current_view = MENU_VIEW_MAIN;
-				Menu_DrawMain();
-			}
-		} else if ((second_state == FIRST_DRIVE_READY)
+			} else if ((second_state == FIRST_DRIVE_READY)
 				&& ((input == INPUT_CMD_L_SINGLE)
 						|| (input == INPUT_CMD_L_HOLD))) {
 			Menu_ChangeSecondDriveSetting(-1);
@@ -2940,18 +3430,21 @@ void Main_Menu(void)
 				&& ((input == INPUT_CMD_R_SINGLE)
 						|| (input == INPUT_CMD_R_HOLD))) {
 			Menu_ChangeSecondDriveSetting(1);
-		} else if (input == INPUT_CMD_K_SINGLE) {
+			} else if (input == INPUT_CMD_K_SINGLE) {
 			if ((second_state == FIRST_DRIVE_READY)
 					&& !Sensor_IsCalibrationComplete()) {
 				SecondDrive_Stop();
 				calibration_state = CALIBRATION_READY;
 				current_view = MENU_VIEW_CALIBRATION;
 				Menu_DrawCalibrationReady();
-			} else if (second_state == FIRST_DRIVE_READY) {
-				if (second_drive_selected == 0U) {
-					second_drive_selected = 1U;
-					Menu_RenderSecondDrive();
-				} else if (SecondDrive_Arm()) {
+				} else if (second_state == FIRST_DRIVE_READY) {
+					if (second_drive_selected == 0U) {
+						second_drive_selected = 1U;
+						Menu_RenderSecondDrive();
+					} else if (second_drive_selected == 1U) {
+						second_drive_selected = 2U;
+						Menu_RenderSecondDrive();
+					} else if (SecondDrive_Arm()) {
 					second_drive_arm_tick = HAL_GetTick();
 					Menu_RenderSecondDrive();
 				}

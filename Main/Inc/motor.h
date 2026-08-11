@@ -23,6 +23,8 @@
  * Drive cannot silently use different torque settings.
  */
 #define MOTOR_VREF_DAC_RUN         1536U
+#define MOTOR_VREF_DAC_BRAKE_HARD  MOTOR_VREF_DAC_RUN
+#define MOTOR_VREF_DAC_BRAKE_HOLD  1024U
 #define MOTOR_VREF_CURRENT_MA      910U
 #define MOTOR_PHASE_TEST_DAC       MOTOR_VREF_DAC_RUN
 #define MOTOR_SPEED_TEST_DAC       MOTOR_VREF_DAC_RUN
@@ -55,6 +57,11 @@ bool Motor_DriveStart(uint16_t left_steps_per_second,
 		uint16_t right_steps_per_second, uint16_t vref_dac);
 bool Motor_DriveSetSpeeds(uint16_t left_steps_per_second,
 		uint16_t right_steps_per_second);
+bool Motor_DriveBrakeHoldStart(uint16_t initial_vref_dac);
+void Motor_DriveBrakeHoldSetVref(uint16_t vref_dac);
+void Motor_DriveBrakeHoldProcess(void);
+void Motor_DriveBrakeHoldFinish(void);
+bool Motor_DriveBrakeHoldIsActive(void);
 void Motor_DriveStop(void);
 bool Motor_DriveIsRunning(void);
 void Motor_DriveResetStepCounts(void);

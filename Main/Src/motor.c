@@ -53,6 +53,13 @@ static volatile int8_t motor_r_direction = 1;
 static volatile uint32_t motor_l_step_count = 0U;
 static volatile uint32_t motor_r_step_count = 0U;
 static volatile bool motor_drive_running = false;
+typedef enum {
+	MOTOR_BRAKE_IDLE = 0,
+	MOTOR_BRAKE_HARD,
+	MOTOR_BRAKE_REDUCED
+} MotorBrakeState_t;
+static volatile MotorBrakeState_t motor_brake_state = MOTOR_BRAKE_IDLE;
+static volatile uint32_t motor_brake_state_tick = 0U;
 static bool motor_speed_test_running = false;
 static uint16_t motor_speed_test_current_sps = 0U;
 static uint16_t motor_speed_test_target_sps = 0U;
@@ -211,6 +218,8 @@ void Motor_Stop() {
 	HAL_DAC_Stop(&hdac1, DAC_CHANNEL_2);
 	phase_test_armed = false;
 	motor_drive_running = false;
+	motor_brake_state = MOTOR_BRAKE_IDLE;
+	motor_brake_state_tick = 0U;
 	motor_speed_test_running = false;
 	motor_speed_test_current_sps = 0U;
 	motor_speed_test_target_sps = 0U;
@@ -405,7 +414,72 @@ bool Motor_DriveSetSpeeds(uint16_t left_steps_per_second,
 		return false;
 	}
 	return Motor_UpdateStepTimers(left_steps_per_second,
-			right_steps_per_second);
+				right_steps_per_second);
+}
+
+bool Motor_DriveBrakeHoldStart(uint16_t initial_vref_dac)
+{
+	if (motor_brake_state != MOTOR_BRAKE_IDLE) {
+		return true;
+	}
+	if (initial_vref_dac > MOTOR_VREF_DAC_ABSOLUTE_MAX) {
+		initial_vref_dac = MOTOR_VREF_DAC_ABSOLUTE_MAX;
+	}
+
+	/* Stop step generation without changing the already-energized phase
+	 * patterns.  This is deliberately not Motor_Stop(): the short hard-hold
+	 * phase needs the last electrical phase to remain applied. */
+	HAL_TIM_Base_Stop_IT(TIM_MOTOR_L);
+	HAL_TIM_Base_Stop_IT(TIM_MOTOR_R);
+	if (HAL_DAC_Start(&hdac1, DAC_CHANNEL_2) != HAL_OK) {
+		Motor_Stop();
+		return false;
+	}
+	Motor_Vref_Set(initial_vref_dac);
+	motor_drive_running = false;
+	motor_brake_state = MOTOR_BRAKE_HARD;
+	motor_brake_state_tick = HAL_GetTick();
+	return true;
+}
+
+void Motor_DriveBrakeHoldSetVref(uint16_t vref_dac)
+{
+	if (motor_brake_state == MOTOR_BRAKE_IDLE) {
+		return;
+	}
+	if (vref_dac > MOTOR_VREF_DAC_ABSOLUTE_MAX) {
+		vref_dac = MOTOR_VREF_DAC_ABSOLUTE_MAX;
+	}
+	Motor_Vref_Set(vref_dac);
+}
+
+void Motor_DriveBrakeHoldProcess(void)
+{
+	uint32_t now;
+
+	if (motor_brake_state == MOTOR_BRAKE_IDLE) {
+		return;
+	}
+	now = HAL_GetTick();
+	if ((motor_brake_state == MOTOR_BRAKE_HARD)
+			&& ((now - motor_brake_state_tick) >= 30U)) {
+		Motor_DriveBrakeHoldSetVref(MOTOR_VREF_DAC_BRAKE_HOLD);
+		motor_brake_state = MOTOR_BRAKE_REDUCED;
+		motor_brake_state_tick = now;
+	} else if ((motor_brake_state == MOTOR_BRAKE_REDUCED)
+			&& ((now - motor_brake_state_tick) >= 120U)) {
+		Motor_DriveBrakeHoldFinish();
+	}
+}
+
+void Motor_DriveBrakeHoldFinish(void)
+{
+	Motor_Stop();
+}
+
+bool Motor_DriveBrakeHoldIsActive(void)
+{
+	return motor_brake_state != MOTOR_BRAKE_IDLE;
 }
 
 void Motor_DriveStop(void)
