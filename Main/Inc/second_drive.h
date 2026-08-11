@@ -25,18 +25,42 @@ typedef struct {
 	uint8_t overall_percent;
 } SecondDriveConfig_t;
 
+typedef enum {
+	SECOND_DRIVE_SYNC_MAP = 0,
+	SECOND_DRIVE_SYNC_SEEK_CROSS,
+	SECOND_DRIVE_SYNC_INVALID
+} SecondDriveSyncState_t;
+
+typedef enum {
+	SECOND_DRIVE_MISMATCH_NONE = 0,
+	SECOND_DRIVE_MISMATCH_EVENT_TYPE,
+	SECOND_DRIVE_MISMATCH_EVENT_DISTANCE,
+	SECOND_DRIVE_MISMATCH_SEGMENT_OVERDUE,
+	SECOND_DRIVE_MISMATCH_MAP_BOUNDS,
+	SECOND_DRIVE_MISMATCH_ANCHOR_NOT_FOUND,
+	SECOND_DRIVE_MISMATCH_ANCHOR_AMBIGUOUS
+} SecondDriveMismatchReason_t;
+
 typedef struct {
 	uint8_t map_valid;
-	uint8_t fallback_active;
+	SecondDriveSyncState_t sync_state;
+	SecondDriveMismatchReason_t last_mismatch_reason;
 	uint8_t mismatch_count;
+	uint8_t resync_count;
+	uint16_t ignored_event_count;
 	uint16_t replay_event_count;
+	uint16_t expected_event_index;
 	uint16_t segment_index;
 	uint16_t segment_count;
+	uint16_t anchor_count;
+	uint16_t current_anchor_order;
 	TrackSegmentType_t segment_type;
 	TrackSegmentType_t next_segment_type;
+	uint8_t curve_units;
 	uint32_t segment_distance_steps;
 	uint32_t segment_travelled_steps;
 	uint32_t segment_remaining_steps;
+	uint32_t next_restriction_distance_steps;
 } SecondDrivePlannerStatus_t;
 
 typedef struct {

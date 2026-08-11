@@ -1,3 +1,3 @@
-/Users/ehoi/STM32CubeIDE/line_tracer/Core/Src/main.c:78:5:main	8	static
-/Users/ehoi/STM32CubeIDE/line_tracer/Core/Src/main.c:152:6:SystemClock_Config	120	static
-/Users/ehoi/STM32CubeIDE/line_tracer/Core/Src/main.c:221:6:Error_Handler	4	static,ignoring_inline_asm
+/Users/ehoi/STM32CubeIDE/line_tracer_2026/Core/Src/main.c:78:5:main	8	static
+/Users/ehoi/STM32CubeIDE/line_tracer_2026/Core/Src/main.c:152:6:SystemClock_Config	120	static
+/Users/ehoi/STM32CubeIDE/line_tracer_2026/Core/Src/main.c:221:6:Error_Handler	4	static

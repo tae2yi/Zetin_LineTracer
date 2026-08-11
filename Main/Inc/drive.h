@@ -79,6 +79,11 @@ typedef struct {
 	uint8_t confidence;
 	uint8_t edge_union;
 	uint32_t step;
+	uint32_t entry_step;
+	uint32_t exit_step;
+	uint8_t max_center_count;
+	uint16_t wide_center_run;
+	uint16_t both_overlap_run;
 } FirstDriveMarkerLogEntry_t;
 
 typedef struct {
@@ -118,6 +123,11 @@ typedef struct {
 	uint8_t last_marker_type;
 	uint8_t last_marker_confidence;
 	uint8_t last_marker_edge_union;
+	uint16_t cross_tail_suppressed_count;
+	uint32_t last_cross_tail_gap_steps;
+	uint8_t last_cross_tail_edge_union;
+	uint8_t cross_tail_guard_active;
+	uint16_t end_guard_reject_count;
 	uint8_t phase_log_count;
 	uint8_t marker_log_count;
 	uint16_t left_sps;

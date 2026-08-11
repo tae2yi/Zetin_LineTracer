@@ -130,6 +130,10 @@ static int8_t drive_provisional_marker_direction;
 static uint32_t drive_provisional_marker_step;
 static uint32_t drive_marker_slow_until_step;
 static uint32_t drive_cross_until_step;
+static bool drive_cross_tail_guard_active;
+static bool drive_cross_tail_source_valid;
+static uint32_t drive_cross_tail_source_exit_step;
+static uint32_t drive_cross_tail_until_step;
 static uint32_t drive_countdown_tick;
 static uint32_t drive_countdown_frame_tick;
 static uint32_t drive_edge_stuck_tick;
@@ -195,6 +199,96 @@ static bool FirstDrive_IsControlState(FirstDriveState_t state)
 static bool FirstDrive_StepBefore(uint32_t step, uint32_t limit)
 {
 	return (int32_t)(limit - step) > 0;
+}
+
+static bool FirstDrive_CrossTailGapWithin(uint32_t step)
+{
+	uint32_t gap;
+
+	if (!drive_cross_tail_source_valid
+			|| (step < drive_cross_tail_source_exit_step)) {
+		return false;
+	}
+	gap = step - drive_cross_tail_source_exit_step;
+	return (gap <= TRACK_CROSS_TAIL_MAX_GAP_STEPS)
+			&& (drive_cross_tail_until_step
+					>= drive_cross_tail_source_exit_step)
+			&& (step <= drive_cross_tail_until_step);
+}
+
+static void FirstDrive_ResetCrossTailGuard(void)
+{
+	drive_cross_tail_guard_active = false;
+	drive_cross_tail_source_valid = false;
+	drive_cross_tail_source_exit_step = 0U;
+	drive_cross_tail_until_step = 0U;
+	drive_telemetry.cross_tail_guard_active = 0U;
+}
+
+static void FirstDrive_UpdateCrossTailGuard(uint32_t average_step)
+{
+	if (drive_cross_tail_guard_active
+			&& !FirstDrive_CrossTailGapWithin(average_step)) {
+		/* A step before the source is tolerated for startup ordering; only a
+		 * forward step beyond the fixed window expires the provisional guard. */
+		if (average_step >= drive_cross_tail_source_exit_step) {
+			drive_cross_tail_guard_active = false;
+		}
+	}
+	drive_telemetry.cross_tail_guard_active =
+		drive_cross_tail_guard_active ? 1U : 0U;
+}
+
+static bool FirstDrive_CrossTailGuardContainsStep(uint32_t average_step)
+{
+	FirstDrive_UpdateCrossTailGuard(average_step);
+	return drive_cross_tail_guard_active
+			&& FirstDrive_CrossTailGapWithin(average_step);
+}
+
+static void FirstDrive_StartCrossTailGuard(const TrackMarkerEvent_t *event,
+		uint32_t average_step)
+{
+	if ((event == NULL) || (event->type != MARKER_EVENT_CROSS)
+			|| ((event->edge_union & MARKER_EDGE_MASK) == MARKER_EDGE_MASK)) {
+		FirstDrive_ResetCrossTailGuard();
+		return;
+	}
+	drive_cross_tail_source_valid = true;
+	drive_cross_tail_source_exit_step = event->exit_step;
+	drive_cross_tail_until_step =
+			(UINT32_MAX - event->exit_step < TRACK_CROSS_TAIL_MAX_GAP_STEPS)
+					? UINT32_MAX
+					: event->exit_step + TRACK_CROSS_TAIL_MAX_GAP_STEPS;
+	drive_cross_tail_guard_active = true;
+	FirstDrive_UpdateCrossTailGuard(average_step);
+}
+
+static bool FirstDrive_IsDefensiveCrossTail(
+		const TrackMarkerEvent_t *event)
+{
+	if ((event == NULL) || !drive_cross_tail_source_valid
+			|| (event->entry_step < drive_cross_tail_source_exit_step)) {
+		return false;
+	}
+	return FirstDrive_CrossTailGapWithin(event->entry_step)
+			&& (event->wide_center_run < MARKER_WIDE_MIN_FRAMES)
+			&& ((event->edge_union & MARKER_EDGE_MASK) != 0U);
+}
+
+static void FirstDrive_UpdateTrackDiagnostics(void)
+{
+	TrackCollectorDiagnostics_t diagnostics;
+
+	Track_GetCollectorDiagnostics(drive_run_mode == DRIVE_RUN_SECOND,
+			&diagnostics);
+	drive_telemetry.cross_tail_suppressed_count =
+			diagnostics.cross_tail_suppressed_count;
+	drive_telemetry.last_cross_tail_gap_steps =
+			diagnostics.last_cross_tail_gap_steps;
+	drive_telemetry.last_cross_tail_edge_union =
+			diagnostics.last_cross_tail_edge_union;
+	FirstDrive_UpdateCrossTailGuard(drive_telemetry.average_steps);
 }
 
 static uint32_t FirstDrive_AbsolutePosition(int32_t position)
@@ -300,9 +394,37 @@ static void FirstDrive_RecordMarkerEvent(const TrackMarkerEvent_t *event)
 	drive_telemetry.marker_log[0].confidence = event->confidence;
 	drive_telemetry.marker_log[0].edge_union = event->edge_union;
 	drive_telemetry.marker_log[0].step = event->center_step;
+	drive_telemetry.marker_log[0].entry_step = event->entry_step;
+	drive_telemetry.marker_log[0].exit_step = event->exit_step;
+	drive_telemetry.marker_log[0].max_center_count = event->max_center_count;
+	drive_telemetry.marker_log[0].wide_center_run = event->wide_center_run;
+	drive_telemetry.marker_log[0].both_overlap_run =
+			event->both_overlap_run;
 	if (drive_telemetry.marker_log_count < FIRST_DRIVE_MARKER_LOG_DEPTH) {
 		drive_telemetry.marker_log_count++;
 	}
+}
+
+static void FirstDrive_RefreshMarkerEventLog(
+		const TrackMarkerEvent_t *event)
+{
+	volatile FirstDriveMarkerLogEntry_t *entry;
+
+	if ((event == NULL) || (drive_telemetry.marker_log_count == 0U)) {
+		return;
+	}
+	entry = &drive_telemetry.marker_log[0];
+	if ((entry->type != (uint8_t)MARKER_EVENT_CROSS)
+			|| (entry->step != event->center_step)) {
+		return;
+	}
+	entry->confidence = event->confidence;
+	entry->edge_union = event->edge_union;
+	entry->entry_step = event->entry_step;
+	entry->exit_step = event->exit_step;
+	entry->max_center_count = event->max_center_count;
+	entry->wide_center_run = event->wide_center_run;
+	entry->both_overlap_run = event->both_overlap_run;
 }
 
 static void FirstDrive_SetCoursePhase(FirstDriveCoursePhase_t phase,
@@ -536,8 +658,10 @@ static void FirstDrive_ProcessMarker(const SensorLineMeasurement_t *line,
 	uint8_t marker_mask;
 	uint8_t marker_edges;
 	const TrackMarkerEvent_t *event;
+	TrackProcessResult_t process_result;
 	bool left_marker_now;
 	bool right_marker_now;
+	bool suppress_provisional;
 	int8_t event_direction = 0;
 
 	if ((drive_provisional_marker_direction != 0)
@@ -550,58 +674,85 @@ static void FirstDrive_ProcessMarker(const SensorLineMeasurement_t *line,
 	marker_edges = FirstDrive_GetMarkerEdges(line);
 	/* S0/S7 are marker-only; selected_mask contains S1..S6 exclusively. */
 	marker_mask = (line->selected_mask & (uint8_t)~0x81U) | marker_edges;
+	FirstDrive_UpdateTrackDiagnostics();
+	suppress_provisional = FirstDrive_CrossTailGuardContainsStep(
+			average_step);
 
 	/* Do not wait until the complete 5 cm marker has passed.  Three consecutive
 	 * frames of an isolated edge beside a still-valid centre line are enough to
 	 * begin braking and publish the expected direction.  Track_ProcessSensor()
 	 * continues collecting the full event for debouncing and diagnostics. */
-	left_marker_now = line->line_valid && !line->edge_only
-			&& ((marker_edges & 0x01U) != 0U)
-			&& ((marker_edges & 0x80U) == 0U);
-	right_marker_now = line->line_valid && !line->edge_only
-			&& ((marker_edges & 0x80U) != 0U)
-			&& ((marker_edges & 0x01U) == 0U);
-	if (left_marker_now) {
-		if (drive_marker_left_frames < UINT8_MAX) {
-			drive_marker_left_frames++;
-		}
-	} else {
+	if (suppress_provisional) {
+		left_marker_now = false;
+		right_marker_now = false;
 		drive_marker_left_frames = 0U;
-	}
-	if (right_marker_now) {
-		if (drive_marker_right_frames < UINT8_MAX) {
-			drive_marker_right_frames++;
-		}
-	} else {
 		drive_marker_right_frames = 0U;
-	}
-	if (drive_marker_left_frames == TRACK_MARK_CONFIRM_FRAMES) {
-		FirstDrive_HandleDirectionalMarker(-1, average_step,
-				FIRST_DRIVE_PHASE_REASON_MARKER_PROVISIONAL);
-		FirstDrive_SetProvisionalMarker(-1, average_step);
-	} else if (drive_marker_right_frames == TRACK_MARK_CONFIRM_FRAMES) {
-		FirstDrive_HandleDirectionalMarker(1, average_step,
-				FIRST_DRIVE_PHASE_REASON_MARKER_PROVISIONAL);
-		FirstDrive_SetProvisionalMarker(1, average_step);
+		FirstDrive_SetProvisionalMarker(0, average_step);
+	} else {
+		left_marker_now = line->line_valid && !line->edge_only
+				&& ((marker_edges & 0x01U) != 0U)
+				&& ((marker_edges & 0x80U) == 0U);
+		right_marker_now = line->line_valid && !line->edge_only
+				&& ((marker_edges & 0x80U) != 0U)
+				&& ((marker_edges & 0x01U) == 0U);
+		if (left_marker_now) {
+			if (drive_marker_left_frames < UINT8_MAX) {
+				drive_marker_left_frames++;
+			}
+		} else {
+			drive_marker_left_frames = 0U;
+		}
+		if (right_marker_now) {
+			if (drive_marker_right_frames < UINT8_MAX) {
+				drive_marker_right_frames++;
+			}
+		} else {
+			drive_marker_right_frames = 0U;
+		}
+		if (drive_marker_left_frames == TRACK_MARK_CONFIRM_FRAMES) {
+			FirstDrive_HandleDirectionalMarker(-1, average_step,
+					FIRST_DRIVE_PHASE_REASON_MARKER_PROVISIONAL);
+			FirstDrive_SetProvisionalMarker(-1, average_step);
+		} else if (drive_marker_right_frames == TRACK_MARK_CONFIRM_FRAMES) {
+			FirstDrive_HandleDirectionalMarker(1, average_step,
+					FIRST_DRIVE_PHASE_REASON_MARKER_PROVISIONAL);
+			FirstDrive_SetProvisionalMarker(1, average_step);
+		}
 	}
 
-	if ((drive_run_mode == DRIVE_RUN_FIRST)
-			? !Track_ProcessSensor(marker_mask, frame_number, average_step)
-			: !Track_ProcessReplaySensor(marker_mask, frame_number, average_step)) {
+	process_result = (drive_run_mode == DRIVE_RUN_FIRST)
+			? Track_ProcessSensor(marker_mask, frame_number, average_step)
+			: Track_ProcessReplaySensor(marker_mask, frame_number, average_step);
+	if (process_result == TRACK_PROCESS_NONE) {
+		FirstDrive_UpdateTrackDiagnostics();
 		return;
 	}
 	event = (drive_run_mode == DRIVE_RUN_FIRST)
 			? Track_GetLastEvent() : Track_GetLastReplayEvent();
-	if (drive_run_mode == DRIVE_RUN_FIRST) {
+	if ((drive_run_mode == DRIVE_RUN_FIRST)
+			&& (process_result == TRACK_PROCESS_EVENT_READY)) {
 		drive_telemetry.event_count = Track_GetEventCount();
-	} else {
+	} else if (process_result == TRACK_PROCESS_EVENT_READY) {
 		drive_telemetry.event_count++;
 	}
 	if (event != NULL) {
 		drive_telemetry.last_marker_type = (uint8_t)event->type;
 		drive_telemetry.last_marker_confidence = event->confidence;
 		drive_telemetry.last_marker_edge_union = event->edge_union;
-		FirstDrive_RecordMarkerEvent(event);
+		if (process_result == TRACK_PROCESS_CROSS_TAIL_MERGED) {
+			FirstDrive_RefreshMarkerEventLog(event);
+		} else {
+			FirstDrive_RecordMarkerEvent(event);
+		}
+	}
+	FirstDrive_UpdateTrackDiagnostics();
+	if (process_result == TRACK_PROCESS_CROSS_TAIL_MERGED) {
+		if ((event != NULL)
+				&& ((event->edge_union & MARKER_EDGE_MASK)
+						== MARKER_EDGE_MASK)) {
+			FirstDrive_ResetCrossTailGuard();
+		}
+		return;
 	}
 	if ((event == NULL) || (event->confidence < 20U)) {
 		return;
@@ -622,10 +773,17 @@ static void FirstDrive_ProcessMarker(const SensorLineMeasurement_t *line,
 				+ FIRST_DRIVE_CROSS_PASS_STEPS;
 		FirstDrive_SetCoursePhase(FIRST_DRIVE_COURSE_CROSS,
 				average_step, FIRST_DRIVE_PHASE_REASON_CROSS_MARKER);
+		FirstDrive_StartCrossTailGuard(event, average_step);
 		FirstDrive_SetProvisionalMarker(0, average_step);
 		break;
 	case MARKER_EVENT_BOTH:
 		FirstDrive_SetProvisionalMarker(0, average_step);
+		if (FirstDrive_IsDefensiveCrossTail(event)) {
+			if (drive_telemetry.end_guard_reject_count < UINT16_MAX) {
+				drive_telemetry.end_guard_reject_count++;
+			}
+			break;
+		}
 		/* The start and finish marks are bilateral.  Require real simultaneous
 		 * S0/S7 overlap so two unrelated one-sided events cannot end the run. */
 		if ((event->center_step >= FIRST_DRIVE_START_MARKER_IGNORE_STEPS)
@@ -1372,6 +1530,7 @@ static bool Drive_InitCommon(DriveRunMode_t requested_mode)
 	Sensor_StateReset();
 	drive_run_mode = requested_mode;
 	memset((void *)&drive_telemetry, 0, sizeof(drive_telemetry));
+	FirstDrive_ResetCrossTailGuard();
 	drive_state = FIRST_DRIVE_READY;
 	drive_fault = FIRST_DRIVE_FAULT_NONE;
 	drive_control_enabled = false;
@@ -1522,6 +1681,7 @@ static bool Drive_StartCommon(DriveRunMode_t requested_mode)
 	 * happens during startup can display masks, loss time or motor commands
 	 * left over from the preceding run. */
 	memset((void *)&drive_telemetry, 0, sizeof(drive_telemetry));
+	FirstDrive_ResetCrossTailGuard();
 	drive_timer_divider = 0U;
 	drive_control_irq_count = 0U;
 	drive_control_tick_count = 0U;

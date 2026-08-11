@@ -775,12 +775,13 @@ static void Menu_RenderFirstDrive(bool redraw_layout)
 				const FirstDriveMarkerLogEntry_t *entry =
 						&telemetry.marker_log[log_index];
 
-				snprintf(text, sizeof(text), "%u %s C%u E%02X S%lu",
+				snprintf(text, sizeof(text), "%u %s C%u E%02X I%lu X%lu",
 						(unsigned int)log_index,
 						Menu_FirstDriveMarkerName(entry->type),
 						(unsigned int)entry->confidence,
 						(unsigned int)entry->edge_union,
-						(unsigned long)entry->step);
+						(unsigned long)entry->entry_step,
+						(unsigned long)entry->exit_step);
 			} else {
 				snprintf(text, sizeof(text), "%u -- NO EVENT --",
 						(unsigned int)log_index);
@@ -833,11 +834,11 @@ static void Menu_RenderFirstDrive(bool redraw_layout)
 					(unsigned int)telemetry.right_sps);
 		}
 		Menu_DrawFirstDriveLine(3U, 95U, LCD_COLOR_GRAY, text);
-		snprintf(text, sizeof(text), "S%lu B%c C%u L/R LOG",
-				(unsigned long)telemetry.average_steps,
-				(telemetry.bridge_recovery_direction < 0) ? 'L'
-						: ((telemetry.bridge_recovery_direction > 0) ? 'R' : '-'),
-				(unsigned int)telemetry.steer_limit_permille);
+		snprintf(text, sizeof(text), "TAIL N%u G%lu E%02X A%u",
+				(unsigned int)telemetry.cross_tail_suppressed_count,
+				(unsigned long)telemetry.last_cross_tail_gap_steps,
+				(unsigned int)telemetry.last_cross_tail_edge_union,
+				(unsigned int)telemetry.cross_tail_guard_active);
 		Menu_DrawFirstDriveLine(4U, 110U, LCD_COLOR_CYAN, text);
 	}
 	first_drive_displayed_state = state;
@@ -906,6 +907,31 @@ static const char *Menu_SecondDriveSegmentName(TrackSegmentType_t type)
 	}
 }
 
+static const char *Menu_SecondDriveSyncName(SecondDriveSyncState_t state)
+{
+	switch (state) {
+	case SECOND_DRIVE_SYNC_SEEK_CROSS: return "SEEK CROSS";
+	case SECOND_DRIVE_SYNC_INVALID: return "MAP INVALID";
+	case SECOND_DRIVE_SYNC_MAP:
+	default: return "MAP SYNC";
+	}
+}
+
+static const char *Menu_SecondDriveMismatchName(
+		SecondDriveMismatchReason_t reason)
+{
+	switch (reason) {
+	case SECOND_DRIVE_MISMATCH_EVENT_TYPE: return "TYPE";
+	case SECOND_DRIVE_MISMATCH_EVENT_DISTANCE: return "DIST";
+	case SECOND_DRIVE_MISMATCH_SEGMENT_OVERDUE: return "OVERDUE";
+	case SECOND_DRIVE_MISMATCH_MAP_BOUNDS: return "BOUNDS";
+	case SECOND_DRIVE_MISMATCH_ANCHOR_NOT_FOUND: return "ANCHOR NF";
+	case SECOND_DRIVE_MISMATCH_ANCHOR_AMBIGUOUS: return "ANCHOR AMB";
+	case SECOND_DRIVE_MISMATCH_NONE:
+	default: return "NONE";
+	}
+}
+
 static void Menu_RenderSecondDrive(void)
 {
 	char text[48];
@@ -939,12 +965,14 @@ static void Menu_RenderSecondDrive(void)
 				&& (second_drive_selected == 1U))
 				? LCD_COLOR_CYAN : LCD_COLOR_BLACK;
 
-		snprintf(text, sizeof(text), "MAP %s  E%u S%u",
-				telemetry.planner.map_valid ? "OK" : "INVALID",
+		snprintf(text, sizeof(text), "%s E%u S%u A%u",
+				Menu_SecondDriveSyncName(telemetry.planner.sync_state),
 				(unsigned int)Track_GetEventCount(),
-				(unsigned int)telemetry.planner.segment_count);
+				(unsigned int)telemetry.planner.segment_count,
+				(unsigned int)telemetry.planner.anchor_count);
 		Menu_DrawText(8U, 27U, 12U,
-				telemetry.planner.map_valid ? LCD_COLOR_GREEN : LCD_COLOR_RED,
+				(telemetry.planner.sync_state == SECOND_DRIVE_SYNC_MAP)
+						? LCD_COLOR_GREEN : LCD_COLOR_RED,
 				LCD_COLOR_BLACK, text);
 		ST7789_LCD_Driver.FillRect(&st7789_pObj, 6U, 43U,
 				228U, 23U, straight_bg);
@@ -978,22 +1006,27 @@ static void Menu_RenderSecondDrive(void)
 				(unsigned int)config->straight_sps,
 				(unsigned int)config->overall_percent);
 		Menu_DrawText(8U, 55U, 16U, LCD_COLOR_GREEN, LCD_COLOR_BLACK, text);
-		snprintf(text, sizeof(text), "MAP E%u S%u  LINE %s",
+		snprintf(text, sizeof(text), "MAP E%u S%u A%u  LINE %s",
 				(unsigned int)Track_GetEventCount(),
 				(unsigned int)telemetry.planner.segment_count,
+				(unsigned int)telemetry.planner.anchor_count,
 				telemetry.drive.line_valid ? "OK" : "LOST");
 		Menu_DrawText(8U, 80U, 12U, LCD_COLOR_WHITE, LCD_COLOR_BLACK, text);
 		Menu_DrawText(8U, 105U, 12U, LCD_COLOR_YELLOW, LCD_COLOR_BLACK,
 				"CENTER PRESS = CANCEL");
 	} else if (Menu_FirstDriveIsActive(state)) {
-		snprintf(text, sizeof(text), "SEG %u/%u %s  R%lu",
+		const bool has_anchor =
+				telemetry.planner.current_anchor_order != UINT16_MAX;
+
+		snprintf(text, sizeof(text), "SEG %u/%u %s U%u R%lu",
 				(unsigned int)(telemetry.planner.segment_index + 1U),
 				(unsigned int)telemetry.planner.segment_count,
 				Menu_SecondDriveSegmentName(telemetry.planner.segment_type),
+				(unsigned int)telemetry.planner.curve_units,
 				(unsigned long)telemetry.planner.segment_remaining_steps);
 		Menu_DrawText(8U, 27U, 12U,
-				telemetry.planner.fallback_active
-						? LCD_COLOR_YELLOW : LCD_COLOR_CYAN,
+				(telemetry.planner.sync_state == SECOND_DRIVE_SYNC_MAP)
+						? LCD_COLOR_CYAN : LCD_COLOR_YELLOW,
 				LCD_COLOR_BLACK, text);
 		snprintf(text, sizeof(text), "V%4u>%4u  L/R %4u/%4u",
 				(unsigned int)telemetry.drive.target_centre_sps,
@@ -1007,16 +1040,35 @@ static void Menu_RenderSecondDrive(void)
 				(unsigned int)telemetry.drive.line_lost_ms,
 				(unsigned int)telemetry.drive.line_lost_limit_ms);
 		Menu_DrawText(8U, 69U, 12U, LCD_COLOR_WHITE, LCD_COLOR_BLACK, text);
-		snprintf(text, sizeof(text), "%s  MISMATCH %u  EVENT %u",
-				telemetry.planner.fallback_active ? "FALLBACK" : "MAP SYNC",
-				(unsigned int)telemetry.planner.mismatch_count,
-				(unsigned int)telemetry.planner.replay_event_count);
+		if (has_anchor) {
+				snprintf(text, sizeof(text), "A%u/%u E%u NR%lu T%u",
+						(unsigned int)telemetry.planner.current_anchor_order,
+						(unsigned int)telemetry.planner.anchor_count,
+						(unsigned int)telemetry.planner.expected_event_index,
+						(unsigned long)telemetry.planner.next_restriction_distance_steps,
+						(unsigned int)telemetry.drive.cross_tail_suppressed_count);
+			} else {
+				snprintf(text, sizeof(text), "A-/%u E%u NR%lu T%u",
+						(unsigned int)telemetry.planner.anchor_count,
+						(unsigned int)telemetry.planner.expected_event_index,
+						(unsigned long)telemetry.planner.next_restriction_distance_steps,
+						(unsigned int)telemetry.drive.cross_tail_suppressed_count);
+		}
 		Menu_DrawText(8U, 90U, 12U,
-				telemetry.planner.fallback_active
-						? LCD_COLOR_YELLOW : LCD_COLOR_GREEN,
+				(telemetry.planner.sync_state == SECOND_DRIVE_SYNC_MAP)
+						? LCD_COLOR_GREEN : LCD_COLOR_YELLOW,
 				LCD_COLOR_BLACK, text);
-		Menu_DrawText(8U, 107U, 12U, LCD_COLOR_YELLOW, LCD_COLOR_BLACK,
-				"CENTER PRESS = STOP");
+		snprintf(text, sizeof(text), "%s M%u R%u %s",
+				Menu_SecondDriveSyncName(telemetry.planner.sync_state),
+				(unsigned int)telemetry.planner.mismatch_count,
+				(unsigned int)telemetry.planner.resync_count,
+				Menu_SecondDriveMismatchName(
+						telemetry.planner.last_mismatch_reason));
+		strncat(text, " C=STOP", sizeof(text) - strlen(text) - 1U);
+		Menu_DrawText(8U, 107U, 12U,
+				(telemetry.planner.sync_state == SECOND_DRIVE_SYNC_MAP)
+						? LCD_COLOR_GREEN : LCD_COLOR_YELLOW,
+				LCD_COLOR_BLACK, text);
 	} else {
 		snprintf(text, sizeof(text), "%s  FAULT %s",
 				Menu_FirstDriveStateName(state), Menu_FirstDriveFaultName(fault));
@@ -1029,17 +1081,20 @@ static void Menu_RenderSecondDrive(void)
 				Menu_SecondDriveSegmentName(telemetry.planner.segment_type),
 				(unsigned long)telemetry.drive.average_steps);
 		Menu_DrawText(8U, 55U, 12U, LCD_COLOR_WHITE, LCD_COLOR_BLACK, text);
-		snprintf(text, sizeof(text), "MAP %s  FALL %u  MISMATCH %u",
-				telemetry.planner.map_valid ? "OK" : "BAD",
-				(unsigned int)telemetry.planner.fallback_active,
-				(unsigned int)telemetry.planner.mismatch_count);
+		snprintf(text, sizeof(text), "%s M%u R%u",
+				Menu_SecondDriveSyncName(telemetry.planner.sync_state),
+				(unsigned int)telemetry.planner.mismatch_count,
+				(unsigned int)telemetry.planner.resync_count);
 		Menu_DrawText(8U, 77U, 12U,
-				telemetry.planner.fallback_active
-						? LCD_COLOR_YELLOW : LCD_COLOR_CYAN,
+				(telemetry.planner.sync_state == SECOND_DRIVE_SYNC_MAP)
+						? LCD_COLOR_CYAN : LCD_COLOR_YELLOW,
 				LCD_COLOR_BLACK, text);
-		snprintf(text, sizeof(text), "TIME %lu MS  EVENTS %u",
-				(unsigned long)telemetry.drive.elapsed_ms,
-				(unsigned int)telemetry.planner.replay_event_count);
+		snprintf(text, sizeof(text), "REASON %s E%u T%u G%lu",
+				Menu_SecondDriveMismatchName(
+						telemetry.planner.last_mismatch_reason),
+				(unsigned int)telemetry.planner.replay_event_count,
+				(unsigned int)telemetry.drive.cross_tail_suppressed_count,
+				(unsigned long)telemetry.drive.last_cross_tail_gap_steps);
 		Menu_DrawText(8U, 98U, 12U, LCD_COLOR_GRAY, LCD_COLOR_BLACK, text);
 	}
 	Menu_DrawText(8U, MENU_FOOTER_Y, 12U,

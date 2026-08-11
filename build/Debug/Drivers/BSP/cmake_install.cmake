@@ -1,4 +1,4 @@
-# Install script for directory: /Users/ehoi/STM32CubeIDE/line_tracer/Drivers/BSP
+# Install script for directory: /Users/ehoi/STM32CubeIDE/line_tracer_2026/Drivers/BSP
 
 # Set the install prefix
 if(NOT DEFINED CMAKE_INSTALL_PREFIX)
@@ -34,12 +34,12 @@ endif()
 
 # Set path to fallback-tool for dependency-resolution.
 if(NOT DEFINED CMAKE_OBJDUMP)
-  set(CMAKE_OBJDUMP "/Applications/STM32CubeIDE.app/Contents/Eclipse/plugins/com.st.stm32cube.ide.mcu.externaltools.gnu-tools-for-stm32.14.3.rel1.macosaarch64_1.0.0.202602081740/tools/bin/arm-none-eabi-objdump")
+  set(CMAKE_OBJDUMP "/opt/homebrew/bin/arm-none-eabi-objdump")
 endif()
 
 string(REPLACE ";" "\n" CMAKE_INSTALL_MANIFEST_CONTENT
        "${CMAKE_INSTALL_MANIFEST_FILES}")
 if(CMAKE_INSTALL_LOCAL_ONLY)
-  file(WRITE "/Users/ehoi/STM32CubeIDE/line_tracer/build/Debug/Drivers/BSP/install_local_manifest.txt"
+  file(WRITE "/Users/ehoi/STM32CubeIDE/line_tracer_2026/build/Debug/Drivers/BSP/install_local_manifest.txt"
      "${CMAKE_INSTALL_MANIFEST_CONTENT}")
 endif()
