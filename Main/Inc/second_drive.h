@@ -34,6 +34,7 @@
 #define SECOND_DRIVE_FAST_STABLE_FRAMES          30U
 #define SECOND_DRIVE_FINAL_EXIT_STABLE_FRAMES    50U
 #define SECOND_DRIVE_LIMIT_TRACE_DEPTH           16U
+#define SECOND_DRIVE_END_APPROACH_SPS          1800U
 
 typedef struct {
 	uint16_t straight_sps;
@@ -86,8 +87,24 @@ typedef enum {
 	SECOND_DRIVE_LIMIT_RECOVERY,
 	SECOND_DRIVE_LIMIT_MAX_CLAMP,
 	SECOND_DRIVE_LIMIT_END_BRAKE,
+	SECOND_DRIVE_LIMIT_END_APPROACH_SAFE,
 	SECOND_DRIVE_LIMIT_COUNT
 } SecondDriveLimitReason_t;
+
+typedef enum {
+	SECOND_DRIVE_END_POLICY_NONE = 0,
+	SECOND_DRIVE_END_POLICY_FAST_CORRIDOR,
+	SECOND_DRIVE_END_POLICY_SAFE_APPROACH,
+	SECOND_DRIVE_END_POLICY_MAP_UNCERTAIN
+} SecondDriveEndPolicy_t;
+
+typedef enum {
+	SECOND_DRIVE_STOP_MODE_NONE = 0,
+	SECOND_DRIVE_STOP_MODE_ACTIVE_BRAKE,
+	SECOND_DRIVE_STOP_MODE_ACTIVE_BRAKE_FAILED_FULL_OFF,
+	SECOND_DRIVE_STOP_MODE_EMERGENCY_FULL_OFF,
+	SECOND_DRIVE_STOP_MODE_FAULT_FULL_OFF
+} SecondDriveStopMode_t;
 
 typedef enum {
 	SECOND_DRIVE_LOCAL_REPAIR_NONE = 0,
@@ -104,7 +121,11 @@ typedef enum {
 	SECOND_DRIVE_MARKER_REJECT_NO_LINE = 0,
 	SECOND_DRIVE_MARKER_REJECT_OFF_CENTER,
 	SECOND_DRIVE_MARKER_REJECT_NO_CENTER_MASK,
-	SECOND_DRIVE_MARKER_REJECT_BRIDGE
+	SECOND_DRIVE_MARKER_REJECT_BRIDGE,
+	SECOND_DRIVE_MARKER_REJECT_CROSS_TAIL_SUPPRESSED,
+	SECOND_DRIVE_MARKER_REJECT_LOW_CONFIDENCE,
+	SECOND_DRIVE_MARKER_REJECT_COOLDOWN_OR_DUPLICATE,
+	SECOND_DRIVE_MARKER_REJECT_COUNT
 } SecondDriveMarkerRejectReason_t;
 
 typedef struct {
@@ -136,6 +157,16 @@ typedef struct {
 	uint8_t fast_gate_ready;
 	uint8_t cross_approach_corridor;
 	uint8_t final_end_corridor;
+	uint8_t final_end_expected;
+	SecondDriveEndPolicy_t end_policy;
+	uint8_t end_fallback_active;
+	uint32_t end_fallback_entry_step;
+	uint16_t end_fallback_entry_sps;
+	uint32_t end_distance_steps;
+	SecondDriveStopMode_t stop_mode;
+	uint8_t confirmed_end_stop;
+	uint8_t brake_start_attempted;
+	uint8_t brake_start_succeeded;
 	uint8_t replay_turn_open;
 	int8_t replay_turn_direction;
 	uint8_t local_close_repair_active;
@@ -161,6 +192,10 @@ typedef struct {
 	uint16_t requested_sps;
 	uint16_t final_sps;
 	int16_t line_position;
+	uint32_t distance_to_restriction_steps;
+	uint16_t expected_event_index;
+	SecondDriveSyncState_t sync_state;
+	uint8_t final_end_expected;
 } SecondDriveLimitTraceEntry_t;
 
 typedef struct {
@@ -171,6 +206,19 @@ typedef struct {
 	uint16_t center_sps_max;
 	uint16_t target_sps_max;
 	uint32_t limiter_samples[SECOND_DRIVE_LIMIT_COUNT];
+	uint16_t limiter_episode_count[SECOND_DRIVE_LIMIT_COUNT];
+	uint32_t limiter_max_consecutive_samples[SECOND_DRIVE_LIMIT_COUNT];
+	uint32_t limiter_first_step[SECOND_DRIVE_LIMIT_COUNT];
+	uint32_t limiter_last_step[SECOND_DRIVE_LIMIT_COUNT];
+	uint16_t seek_episode_count;
+	uint32_t seek_max_ms;
+	uint32_t seek_max_steps;
+	uint16_t pair_open_episode_count;
+	uint32_t pair_open_max_ms;
+	uint16_t position_limit_episode_count;
+	uint32_t position_limit_max_ms;
+	uint16_t recovery_episode_count;
+	uint32_t recovery_max_ms;
 	uint16_t fast_entry_count;
 	uint16_t fast_exit_count;
 	uint16_t mismatch_count;
@@ -181,10 +229,27 @@ typedef struct {
 	uint16_t marker_reject_off_center_count;
 	uint16_t marker_reject_no_center_mask_count;
 	uint16_t marker_reject_bridge_count;
+	uint16_t marker_candidate_episode_count;
+	uint16_t marker_candidate_accepted_count;
+	uint16_t marker_candidate_rejected_count;
+	uint16_t marker_reject_cross_tail_count;
+	uint16_t marker_reject_low_confidence_count;
+	uint16_t marker_reject_duplicate_count;
+	uint8_t marker_candidate_last_reject_reason;
+	uint32_t marker_candidate_last_step;
 	uint32_t end_brake_step;
 	uint16_t end_brake_entry_sps;
 	uint16_t brake_hold_ms;
 	uint8_t end_brake_completed;
+	uint8_t final_end_expected;
+	SecondDriveEndPolicy_t end_policy;
+	uint8_t end_fallback_active;
+	uint32_t end_fallback_entry_step;
+	uint16_t end_fallback_entry_sps;
+	uint32_t end_distance_steps;
+	SecondDriveStopMode_t stop_mode;
+	uint8_t brake_start_attempted;
+	uint8_t brake_start_succeeded;
 	uint32_t expected_end_step;
 	int32_t end_step_error;
 	uint8_t trace_count;
@@ -230,8 +295,12 @@ void SecondDrivePlanner_RecordFinalTarget(uint16_t final_target_sps,
 		bool recovery_slow);
 void SecondDrivePlanner_RecordMarkerReject(
 		SecondDriveMarkerRejectReason_t reason);
+void SecondDrivePlanner_RecordMarkerCandidateEpisode(bool accepted,
+		uint8_t reject_reason_mask, uint32_t step);
 bool SecondDrivePlanner_IsFinalEndCorridor(void);
 void SecondDrivePlanner_RecordEndBrake(uint32_t step, uint16_t entry_sps);
+void SecondDrivePlanner_RecordStopMode(SecondDriveStopMode_t mode,
+		bool brake_start_attempted, bool brake_start_succeeded);
 void SecondDrivePlanner_RecordBrakeCompletion(uint16_t hold_ms,
 		bool completed);
 void SecondDrivePlanner_FinalizeRunStats(uint32_t elapsed_ms);

@@ -170,6 +170,7 @@ static uint32_t first_drive_update_tick = 0U;
 static uint32_t first_drive_preview_tick = 0U;
 static uint16_t first_drive_preview_marker_x = 0xFFFFU;
 static uint8_t first_drive_preview_valid = 0xFFU;
+static uint8_t first_drive_curve_selected = 0U;
 typedef enum {
 	FIRST_DRIVE_RESULT_GROUP_SUMMARY = 0,
 	FIRST_DRIVE_RESULT_GROUP_MARKERS,
@@ -191,6 +192,9 @@ static uint32_t second_drive_update_tick = 0U;
 static uint8_t second_drive_result_page = 0U;
 static FirstDriveState_t second_drive_last_rendered_state = FIRST_DRIVE_OFF;
 static uint8_t second_drive_run_screen_locked = 0U;
+static uint32_t second_drive_active_render_count;
+
+static void Menu_RenderFirstDrive(bool redraw_layout);
 
 static void Menu_FillScreen(uint16_t color)
 {
@@ -476,6 +480,28 @@ static void Menu_ChangePdGain(int8_t direction)
 	(void)FirstDrive_SetPdGains(kp_q10, kd_q10);
 	(void)FirstDrive_SetMotorTrim(trim_sps);
 	Menu_DrawPdTuning();
+}
+
+static void Menu_ChangeFirstDriveCurve(int8_t direction)
+{
+	const FirstDriveConfig_t *config = FirstDrive_GetConfig();
+	int32_t value;
+
+	if ((FirstDrive_GetState() != FIRST_DRIVE_READY)
+			|| (first_drive_curve_selected != 0U)) {
+		return;
+	}
+	value = (int32_t)config->curve_cruise_sps
+			+ ((direction < 0)
+					? -(int32_t)FIRST_DRIVE_CURVE_CRUISE_STEP_SPS
+					: (int32_t)FIRST_DRIVE_CURVE_CRUISE_STEP_SPS);
+	if (value < FIRST_DRIVE_CURVE_CRUISE_MIN_SPS) {
+		value = FIRST_DRIVE_CURVE_CRUISE_MIN_SPS;
+	} else if (value > FIRST_DRIVE_CURVE_CRUISE_MAX_SPS) {
+		value = FIRST_DRIVE_CURVE_CRUISE_MAX_SPS;
+	}
+	(void)FirstDrive_SetCurveCruiseSps((uint16_t)value);
+	Menu_RenderFirstDrive(true);
 }
 
 static bool Menu_FirstDriveIsActive(FirstDriveState_t state)
@@ -960,23 +986,25 @@ static void Menu_RenderFirstDrive(bool redraw_layout)
 					"CALIBRATION REQUIRED");
 			Menu_DrawFirstDriveLine(1U, 57U, LCD_COLOR_YELLOW,
 					"C OPEN CALIBRATION");
-		} else {
-				snprintf(text, sizeof(text), "KP%ld KD%ld T%+d B%u",
-						(long)FirstDrive_GetConfig()->kp_q10,
-						(long)FirstDrive_GetConfig()->kd_q10,
-						(int)FirstDrive_GetConfig()->trim_sps,
-						(unsigned int)FirstDrive_GetConfig()->base_sps);
-			Menu_DrawFirstDriveLine(0U, 27U, LCD_COLOR_GREEN, text);
-			Menu_UpdateFirstDrivePreview(1U);
-			Menu_DrawFirstDriveLine(1U, 93U,
-					(state == FIRST_DRIVE_ARMED)
-							? LCD_COLOR_YELLOW : LCD_COLOR_WHITE,
-					(state == FIRST_DRIVE_ARMED)
-							? "ARMED - C START  AUTO CANCEL 5S"
-							: "C ARM  (START REQUIRES VALID LINE)");
-			Menu_DrawFirstDriveLine(2U, 108U, LCD_COLOR_CYAN,
-					"HOLD C BACK");
-		}
+			} else {
+				snprintf(text, sizeof(text), "BASE %u CURVE %u",
+						(unsigned int)FirstDrive_GetConfig()->base_sps,
+						(unsigned int)FirstDrive_GetConfig()->curve_cruise_sps);
+				Menu_DrawFirstDriveLine(0U, 27U, LCD_COLOR_GREEN, text);
+				Menu_UpdateFirstDrivePreview(1U);
+				snprintf(text, sizeof(text), "FLOOR %u  %s",
+						(unsigned int)FirstDrive_GetEffectiveCurveFloorSps(),
+						(first_drive_curve_selected == 0U) ? "CURVE SEL" : "ARM SEL");
+				Menu_DrawFirstDriveLine(1U, 93U,
+						(state == FIRST_DRIVE_ARMED)
+								? LCD_COLOR_YELLOW : LCD_COLOR_WHITE, text);
+				Menu_DrawFirstDriveLine(2U, 108U, LCD_COLOR_CYAN,
+						(state == FIRST_DRIVE_ARMED)
+								? "C START  AUTO CANCEL 5S"
+								: ((first_drive_curve_selected == 0U)
+										? "L/R ADJUST  C NEXT"
+										: "C ARM  HOLD C BACK"));
+			}
 	} else if (state == FIRST_DRIVE_COUNTDOWN) {
 		snprintf(text, sizeof(text), "START IN %u.%01u SEC",
 				(unsigned int)(telemetry.countdown_ms / 1000U),
@@ -1041,6 +1069,7 @@ static void Menu_RenderFirstDrive(bool redraw_layout)
 
 static void Menu_DrawFirstDrive(void)
 {
+	first_drive_curve_selected = 0U;
 	first_drive_result_group = FIRST_DRIVE_RESULT_GROUP_SUMMARY;
 	first_drive_result_page = 0U;
 	first_drive_displayed_state = FIRST_DRIVE_OFF;
@@ -1064,6 +1093,7 @@ static void Menu_UpdateFirstDrive(void)
 	if ((state == FIRST_DRIVE_ARMED)
 			&& ((now - first_drive_arm_tick) >= FIRST_DRIVE_ARM_TIMEOUT_MS)) {
 		FirstDrive_Init();
+		first_drive_curve_selected = 0U;
 		Menu_EnsureFirstDrivePreview();
 		state = FirstDrive_GetState();
 		fault = FirstDrive_GetFault();
@@ -1127,6 +1157,43 @@ static const char *Menu_SecondDriveMismatchName(
 	}
 }
 
+static const char *Menu_SecondDriveEndPolicyName(SecondDriveEndPolicy_t policy)
+{
+	switch (policy) {
+	case SECOND_DRIVE_END_POLICY_FAST_CORRIDOR: return "FAST";
+	case SECOND_DRIVE_END_POLICY_SAFE_APPROACH: return "SAFE";
+	case SECOND_DRIVE_END_POLICY_MAP_UNCERTAIN: return "UNCERTAIN";
+	case SECOND_DRIVE_END_POLICY_NONE:
+	default: return "NONE";
+	}
+}
+
+static const char *Menu_SecondDriveStopModeName(SecondDriveStopMode_t mode)
+{
+	switch (mode) {
+	case SECOND_DRIVE_STOP_MODE_ACTIVE_BRAKE: return "ACTIVE";
+	case SECOND_DRIVE_STOP_MODE_ACTIVE_BRAKE_FAILED_FULL_OFF: return "FAIL OFF";
+	case SECOND_DRIVE_STOP_MODE_EMERGENCY_FULL_OFF: return "EMERG OFF";
+	case SECOND_DRIVE_STOP_MODE_FAULT_FULL_OFF: return "FAULT OFF";
+	case SECOND_DRIVE_STOP_MODE_NONE:
+	default: return "NONE";
+	}
+}
+
+static const char *Menu_SecondDriveMarkerRejectName(uint8_t reason)
+{
+	switch ((SecondDriveMarkerRejectReason_t)reason) {
+	case SECOND_DRIVE_MARKER_REJECT_NO_LINE: return "LINE";
+	case SECOND_DRIVE_MARKER_REJECT_OFF_CENTER: return "OFF";
+	case SECOND_DRIVE_MARKER_REJECT_NO_CENTER_MASK: return "CENTER";
+	case SECOND_DRIVE_MARKER_REJECT_BRIDGE: return "BRIDGE";
+	case SECOND_DRIVE_MARKER_REJECT_CROSS_TAIL_SUPPRESSED: return "TAIL";
+	case SECOND_DRIVE_MARKER_REJECT_LOW_CONFIDENCE: return "CONF";
+	case SECOND_DRIVE_MARKER_REJECT_COOLDOWN_OR_DUPLICATE: return "DUP";
+	default: return "NONE";
+	}
+}
+
 static bool Menu_SecondDriveIsLiveRunning(FirstDriveState_t state)
 {
 	return (state == FIRST_DRIVE_LAUNCH)
@@ -1173,6 +1240,7 @@ static const char *Menu_SecondDriveLimitName(SecondDriveLimitReason_t reason)
 	case SECOND_DRIVE_LIMIT_RECOVERY: return "RECOVERY";
 	case SECOND_DRIVE_LIMIT_MAX_CLAMP: return "MAX_CLAMP";
 	case SECOND_DRIVE_LIMIT_END_BRAKE: return "END_BRAKE";
+	case SECOND_DRIVE_LIMIT_END_APPROACH_SAFE: return "END_SAFE";
 	case SECOND_DRIVE_LIMIT_NONE:
 	default: return "NONE";
 	}
@@ -1197,6 +1265,42 @@ static uint32_t Menu_SecondDriveLimiterPercent(uint32_t count,
 		uint32_t total)
 {
 	return (total == 0U) ? 0U : ((count * 100U) / total);
+}
+
+static SecondDriveLimitReason_t Menu_SecondDriveLongestSafeReason(
+		const SecondDriveRunStats_t *stats, uint32_t *duration)
+{
+	static const SecondDriveLimitReason_t safe_reasons[] = {
+		SECOND_DRIVE_LIMIT_MAP_INVALID,
+		SECOND_DRIVE_LIMIT_SEEK_CROSS,
+		SECOND_DRIVE_LIMIT_SEGMENT_UNCERTAIN,
+		SECOND_DRIVE_LIMIT_MARKER_PAIR_UNCLOSED,
+		SECOND_DRIVE_LIMIT_PHASE_NOT_STRAIGHT,
+		SECOND_DRIVE_LIMIT_END_APPROACH_SAFE
+	};
+	SecondDriveLimitReason_t selected = SECOND_DRIVE_LIMIT_NONE;
+	uint32_t longest = 0U;
+	uint8_t index;
+
+	if (stats == NULL) {
+		if (duration != NULL) {
+			*duration = 0U;
+		}
+		return selected;
+	}
+	for (index = 0U; index < (uint8_t)(sizeof(safe_reasons)
+			/ sizeof(safe_reasons[0])); index++) {
+		SecondDriveLimitReason_t reason = safe_reasons[index];
+
+		if (stats->limiter_max_consecutive_samples[reason] > longest) {
+			longest = stats->limiter_max_consecutive_samples[reason];
+			selected = reason;
+		}
+	}
+	if (duration != NULL) {
+		*duration = longest;
+	}
+	return selected;
 }
 
 static void Menu_RenderSecondDriveResult(const SecondDriveTelemetry_t *telemetry,
@@ -1261,7 +1365,8 @@ static void Menu_RenderSecondDriveResult(const SecondDriveTelemetry_t *telemetry
 				SECOND_DRIVE_LIMIT_CURVE_APPROACH,
 				SECOND_DRIVE_LIMIT_CURVE_EXIT);
 		brake = stats->limiter_samples[SECOND_DRIVE_LIMIT_TURN_BRAKE]
-				+ stats->limiter_samples[SECOND_DRIVE_LIMIT_END_BRAKE];
+				+ stats->limiter_samples[SECOND_DRIVE_LIMIT_END_BRAKE]
+				+ stats->limiter_samples[SECOND_DRIVE_LIMIT_END_APPROACH_SAFE];
 		recovery = stats->limiter_samples[SECOND_DRIVE_LIMIT_RECOVERY];
 		position = stats->limiter_samples[SECOND_DRIVE_LIMIT_POSITION];
 		safe = stats->limiter_samples[SECOND_DRIVE_LIMIT_MAP_INVALID]
@@ -1286,42 +1391,74 @@ static void Menu_RenderSecondDriveResult(const SecondDriveTelemetry_t *telemetry
 		snprintf(text, sizeof(text), "RAW %lu SAMPLES  MAX %u",
 				(unsigned long)total, (unsigned int)stats->target_sps_max);
 		Menu_DrawText(8U, 107U, 12U, LCD_COLOR_GRAY, LCD_COLOR_BLACK, text);
-	} else {
-		direction = telemetry->planner.replay_turn_direction;
-		snprintf(text, sizeof(text), "END BRAKE V%u %s",
-				(unsigned int)stats->end_brake_entry_sps,
-				stats->end_brake_completed ? "DONE" : "N/A");
-		Menu_DrawText(8U, 27U, 12U,
-				stats->end_brake_completed ? LCD_COLOR_GREEN : LCD_COLOR_YELLOW,
+		} else if (page == 2U) {
+			direction = telemetry->planner.replay_turn_direction;
+			snprintf(text, sizeof(text), "END POLICY %s",
+				Menu_SecondDriveEndPolicyName(stats->end_policy));
+			Menu_DrawText(8U, 27U, 12U, LCD_COLOR_CYAN, LCD_COLOR_BLACK, text);
+			snprintf(text, sizeof(text), "FALL S%lu V%u D%lu",
+				(unsigned long)stats->end_fallback_entry_step,
+				(unsigned int)stats->end_fallback_entry_sps,
+				(unsigned long)stats->end_distance_steps);
+			Menu_DrawText(8U, 46U, 12U,
+				stats->end_fallback_active ? LCD_COLOR_YELLOW : LCD_COLOR_GRAY,
 				LCD_COLOR_BLACK, text);
-		snprintf(text, sizeof(text), "PAIR %s %s SRC %s",
+			snprintf(text, sizeof(text), "BRAKE V%u %s",
+				(unsigned int)stats->end_brake_entry_sps,
+				Menu_SecondDriveStopModeName(stats->stop_mode));
+			Menu_DrawText(8U, 65U, 12U,
+				(stats->stop_mode == SECOND_DRIVE_STOP_MODE_ACTIVE_BRAKE)
+						? LCD_COLOR_GREEN : LCD_COLOR_YELLOW,
+				LCD_COLOR_BLACK, text);
+			snprintf(text, sizeof(text), "PAIR %s %s SRC %s",
 				telemetry->planner.replay_turn_open ? "OPEN" : "CLOSED",
 				(direction < 0) ? "L" : ((direction > 0) ? "R" : "-"),
 				Menu_SecondDriveGeometryName(telemetry->planner.geometry_source));
-		Menu_DrawText(8U, 46U, 12U,
+			Menu_DrawText(8U, 84U, 12U,
 				telemetry->planner.replay_turn_open ? LCD_COLOR_RED : LCD_COLOR_GREEN,
 				LCD_COLOR_BLACK, text);
-		snprintf(text, sizeof(text), "LCR%u S%lu DIR %s",
-				(unsigned int)stats->local_close_repair_count,
-				(unsigned long)telemetry->planner.local_close_repair_step,
-				(telemetry->planner.local_close_repair_direction < 0) ? "L"
-						: ((telemetry->planner.local_close_repair_direction > 0)
-							? "R" : "-"));
-		Menu_DrawText(8U, 65U, 12U, LCD_COLOR_WHITE, LCD_COLOR_BLACK, text);
-		snprintf(text, sizeof(text), "EXP S%lu ERR%+ld",
+			snprintf(text, sizeof(text), "EXP S%lu ERR%+ld H%ums",
 				(unsigned long)stats->expected_end_step,
-				(long)stats->end_step_error);
-		Menu_DrawText(8U, 84U, 12U, LCD_COLOR_WHITE, LCD_COLOR_BLACK, text);
-		snprintf(text, sizeof(text), "LAST %s REJ N%u O%u C%u B%u",
-				Menu_SecondDriveLimitName(telemetry->planner.limit_reason),
-				(unsigned int)stats->marker_reject_no_line_count,
+				(long)stats->end_step_error,
+				(unsigned int)stats->brake_hold_ms);
+			Menu_DrawText(8U, 103U, 12U, LCD_COLOR_WHITE, LCD_COLOR_BLACK, text);
+			Menu_DrawText(8U, 119U, 10U, LCD_COLOR_YELLOW, LCD_COLOR_BLACK,
+				"L/R PAGE  C HOLD:BACK");
+		} else {
+			SecondDriveLimitReason_t longest_reason;
+			uint32_t longest_duration;
+
+			longest_reason = Menu_SecondDriveLongestSafeReason(stats,
+					&longest_duration);
+			Menu_DrawText(8U, 27U, 12U, LCD_COLOR_CYAN, LCD_COLOR_BLACK,
+				"MARK CANDIDATE 4/4");
+			snprintf(text, sizeof(text), "CAND%u ACC%u REJ%u",
+				(unsigned int)stats->marker_candidate_episode_count,
+				(unsigned int)stats->marker_candidate_accepted_count,
+				(unsigned int)stats->marker_candidate_rejected_count);
+			Menu_DrawText(8U, 46U, 12U, LCD_COLOR_WHITE, LCD_COLOR_BLACK, text);
+			snprintf(text, sizeof(text), "OFF%u LINE%u CTR%u BR%u",
 				(unsigned int)stats->marker_reject_off_center_count,
+				(unsigned int)stats->marker_reject_no_line_count,
 				(unsigned int)stats->marker_reject_no_center_mask_count,
 				(unsigned int)stats->marker_reject_bridge_count);
-		Menu_DrawText(8U, 103U, 12U, LCD_COLOR_GRAY, LCD_COLOR_BLACK, text);
-		Menu_DrawText(8U, 119U, 10U, LCD_COLOR_YELLOW, LCD_COLOR_BLACK,
+			Menu_DrawText(8U, 65U, 12U, LCD_COLOR_WHITE, LCD_COLOR_BLACK, text);
+			snprintf(text, sizeof(text), "LAST %s S%lu T%u",
+				Menu_SecondDriveMarkerRejectName(
+						stats->marker_candidate_last_reject_reason),
+				(unsigned long)stats->marker_candidate_last_step,
+				(unsigned int)stats->marker_reject_cross_tail_count);
+			Menu_DrawText(8U, 84U, 12U, LCD_COLOR_GRAY, LCD_COLOR_BLACK, text);
+			snprintf(text, sizeof(text), "LONG %s %lums EP S%u P%u R%u",
+				Menu_SecondDriveLimitName(longest_reason),
+				(unsigned long)longest_duration,
+				(unsigned int)stats->seek_episode_count,
+				(unsigned int)stats->pair_open_episode_count,
+				(unsigned int)stats->recovery_episode_count);
+			Menu_DrawText(8U, 103U, 12U, LCD_COLOR_YELLOW, LCD_COLOR_BLACK, text);
+			Menu_DrawText(8U, 119U, 10U, LCD_COLOR_YELLOW, LCD_COLOR_BLACK,
 				"L/R PAGE  C HOLD:BACK");
-	}
+		}
 }
 
 static void Menu_RenderSecondDrive(void)
@@ -1549,6 +1686,7 @@ static void Menu_DrawSecondDrive(void)
 	second_drive_result_page = 0U;
 	second_drive_last_rendered_state = FIRST_DRIVE_OFF;
 	second_drive_run_screen_locked = 0U;
+	second_drive_active_render_count = 0U;
 	Menu_FillScreen(LCD_COLOR_BLACK);
 	Menu_DrawText(8U, 2U, 16U,
 			LCD_COLOR_CYAN, LCD_COLOR_BLACK, "8. SECOND DRIVE");
@@ -1629,6 +1767,11 @@ static void Menu_UpdateSecondDrive(void)
 		second_drive_update_tick = now;
 		Menu_RenderSecondDrive();
 	}
+}
+
+uint32_t Menu_GetSecondDriveActiveRenderCount(void)
+{
+	return second_drive_active_render_count;
 }
 
 static void Menu_UpdateSensorRaw(uint8_t force_update)
@@ -3330,8 +3473,8 @@ void Main_Menu(void)
 			FirstDrive_EmergencyStop();
 			Button_IgnoreCenterUntilRelease();
 			Menu_RenderFirstDrive(true);
-		} else if (((first_state == FIRST_DRIVE_FAULT)
-				|| (first_state == FIRST_DRIVE_STOPPED))
+			} else if (((first_state == FIRST_DRIVE_FAULT)
+					|| (first_state == FIRST_DRIVE_STOPPED))
 				&& (input == INPUT_CMD_K_SINGLE)) {
 			first_drive_result_group = (uint8_t)
 					((first_drive_result_group + 1U)
@@ -3353,9 +3496,20 @@ void Main_Menu(void)
 				first_drive_result_page = (uint8_t)
 						((first_drive_result_page + 1U)
 								% FIRST_DRIVE_RESULT_PAGES_PER_GROUP);
-			}
+				}
 			Menu_RenderFirstDrive(true);
-		} else if (input == INPUT_CMD_K_HOLD) {
+			} else if ((first_state == FIRST_DRIVE_READY)
+					&& ((input == INPUT_CMD_L_SINGLE)
+							|| (input == INPUT_CMD_L_HOLD)
+							|| (input == INPUT_CMD_R_SINGLE)
+							|| (input == INPUT_CMD_R_HOLD))) {
+				if ((input == INPUT_CMD_L_SINGLE)
+						|| (input == INPUT_CMD_L_HOLD)) {
+					Menu_ChangeFirstDriveCurve(-1);
+				} else {
+					Menu_ChangeFirstDriveCurve(1);
+				}
+			} else if (input == INPUT_CMD_K_HOLD) {
 			if (Menu_FirstDriveIsActive(first_state)) {
 				FirstDrive_EmergencyStop();
 				Menu_RenderFirstDrive(true);
@@ -3371,9 +3525,12 @@ void Main_Menu(void)
 				calibration_state = CALIBRATION_READY;
 				current_view = MENU_VIEW_CALIBRATION;
 				Menu_DrawCalibrationReady();
-			} else if (first_state == FIRST_DRIVE_READY) {
-				if (FirstDrive_Arm()) {
-					first_drive_arm_tick = HAL_GetTick();
+				} else if (first_state == FIRST_DRIVE_READY) {
+					if (first_drive_curve_selected == 0U) {
+						first_drive_curve_selected = 1U;
+						Menu_RenderFirstDrive(true);
+					} else if (FirstDrive_Arm()) {
+						first_drive_arm_tick = HAL_GetTick();
 					Menu_RenderFirstDrive(true);
 				}
 			} else if (first_state == FIRST_DRIVE_ARMED) {
@@ -3416,10 +3573,10 @@ void Main_Menu(void)
 				if ((input == INPUT_CMD_L_SINGLE)
 						|| (input == INPUT_CMD_L_HOLD)) {
 					second_drive_result_page = (second_drive_result_page == 0U)
-							? 2U : (uint8_t)(second_drive_result_page - 1U);
+						? 3U : (uint8_t)(second_drive_result_page - 1U);
 				} else {
 					second_drive_result_page = (uint8_t)
-							((second_drive_result_page + 1U) % 3U);
+						((second_drive_result_page + 1U) % 4U);
 				}
 				Menu_RenderSecondDrive();
 			} else if ((second_state == FIRST_DRIVE_READY)

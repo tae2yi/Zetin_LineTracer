@@ -13,6 +13,13 @@
 
 #include "track.h"
 
+#define FIRST_DRIVE_CURVE_CRUISE_DEFAULT_SPS 2200U
+#define FIRST_DRIVE_CURVE_CRUISE_MIN_SPS     2200U
+#define FIRST_DRIVE_CURVE_CRUISE_MAX_SPS     2600U
+#define FIRST_DRIVE_CURVE_CRUISE_STEP_SPS     100U
+#define FIRST_DRIVE_CURVE_FLOOR_DELTA_SPS     400U
+#define FIRST_DRIVE_CURVE_FLOOR_MIN_SPS      1800U
+
 typedef enum {
 	FIRST_DRIVE_OFF = 0,
 	FIRST_DRIVE_READY,
@@ -113,6 +120,7 @@ typedef struct {
 typedef struct {
 	uint16_t launch_sps;
 	uint16_t base_sps;
+	uint16_t curve_cruise_sps;
 	uint16_t minimum_sps;
 	uint16_t maximum_sps;
 	uint16_t ramp_sps_per_10ms;
@@ -197,6 +205,18 @@ typedef struct {
 	uint16_t tail_cross_count;
 	uint32_t tail_max_gap_steps;
 	uint16_t end_guard_reject_count;
+	uint16_t candidate_episode_count;
+	uint16_t candidate_accepted_count;
+	uint16_t candidate_rejected_count;
+	uint16_t candidate_reject_no_line_count;
+	uint16_t candidate_reject_off_center_count;
+	uint16_t candidate_reject_no_center_mask_count;
+	uint16_t candidate_reject_bridge_count;
+	uint16_t candidate_reject_cross_tail_count;
+	uint16_t candidate_reject_low_confidence_count;
+	uint16_t candidate_reject_duplicate_count;
+	uint8_t last_candidate_reject_reason;
+	uint32_t last_candidate_step;
 	uint8_t track_overflow;
 	uint8_t anchor_overflow;
 	uint8_t map_valid;
@@ -287,6 +307,18 @@ void FirstDrive_GetRunRecord(FirstDriveRunRecord_t *record);
 const FirstDriveConfig_t *FirstDrive_GetConfig(void);
 bool FirstDrive_SetPdGains(int32_t kp_q10, int32_t kd_q10);
 bool FirstDrive_SetMotorTrim(int16_t trim_sps);
+bool FirstDrive_SetCurveCruiseSps(uint16_t curve_cruise_sps);
+uint16_t FirstDrive_GetEffectiveCurveFloorSps(void);
+
+#ifdef V31_HOST_TEST
+void FirstDrive_HostTestCandidateReset(void);
+void FirstDrive_HostTestCandidateFrame(uint8_t raw_edges,
+		bool line_valid, int32_t position, uint8_t selected_mask,
+		bool accepted, uint32_t step);
+void FirstDrive_HostTestCandidateClear(uint32_t step);
+void FirstDrive_HostTestGetCandidateSummary(
+		FirstDriveMarkerSummary_t *summary);
+#endif
 
 /* Called from the existing TIM7 period callback. */
 void HAL_TIM7_IRQ_Handler(void);

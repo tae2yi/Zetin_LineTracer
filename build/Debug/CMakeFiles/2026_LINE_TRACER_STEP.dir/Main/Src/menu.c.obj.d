@@ -1,8 +1,6 @@
 CMakeFiles/2026_LINE_TRACER_STEP.dir/Main/Src/menu.c.obj: \
  /Users/ehoi/STM32CubeIDE/line_tracer_2026/Main/Src/menu.c \
  /Users/ehoi/STM32CubeIDE/line_tracer_2026/Main/./Inc/menu.h \
- /Users/ehoi/STM32CubeIDE/line_tracer_2026/Main/./Inc/app_version.h \
- /Users/ehoi/STM32CubeIDE/line_tracer_2026/Main/./Inc/button.h \
  /Applications/ArmGNUToolchain/15.2.rel1/arm-none-eabi/lib/gcc/arm-none-eabi/15.2.1/include/stdint.h \
  /Applications/ArmGNUToolchain/15.2.rel1/arm-none-eabi/arm-none-eabi/include/stdint.h \
  /Applications/ArmGNUToolchain/15.2.rel1/arm-none-eabi/arm-none-eabi/include/machine/_default_types.h \
@@ -10,6 +8,8 @@ CMakeFiles/2026_LINE_TRACER_STEP.dir/Main/Src/menu.c.obj: \
  /Applications/ArmGNUToolchain/15.2.rel1/arm-none-eabi/arm-none-eabi/include/_newlib_version.h \
  /Applications/ArmGNUToolchain/15.2.rel1/arm-none-eabi/arm-none-eabi/include/sys/_intsup.h \
  /Applications/ArmGNUToolchain/15.2.rel1/arm-none-eabi/arm-none-eabi/include/sys/_stdint.h \
+ /Users/ehoi/STM32CubeIDE/line_tracer_2026/Main/./Inc/app_version.h \
+ /Users/ehoi/STM32CubeIDE/line_tracer_2026/Main/./Inc/button.h \
  /Applications/ArmGNUToolchain/15.2.rel1/arm-none-eabi/lib/gcc/arm-none-eabi/15.2.1/include/stdbool.h \
  /Users/ehoi/STM32CubeIDE/line_tracer_2026/cmake/stm32cubemx/../../Core/Inc/main.h \
  /Users/ehoi/STM32CubeIDE/line_tracer_2026/cmake/stm32cubemx/../../Drivers/STM32H5xx_HAL_Driver/Inc/stm32h5xx_hal.h \

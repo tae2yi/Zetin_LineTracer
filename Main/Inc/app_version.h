@@ -2,6 +2,6 @@
 #define INC_APP_VERSION_H_
 
 /* Increment this number for each tested firmware update. */
-#define APP_VERSION_NUMBER 30U
+#define APP_VERSION_NUMBER 31U
 
 #endif /* INC_APP_VERSION_H_ */
